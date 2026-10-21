@@ -283,9 +283,50 @@ jobs:
         with:
           name: plugin-bundle
 
+      - name: Verify release bundle
+        if: steps.guard.outputs.on_main == 'true'
+        env:
+          PLUGIN_VERSION: ${{ needs.set-version.outputs.version }}
+        run: |
+          BUNDLE="${PLUGIN_ID}-${PLUGIN_VERSION}.tar.gz"
+          test -s "$BUNDLE"
+
+          python3 - "$BUNDLE" "$PLUGIN_ID" "$PLUGIN_VERSION" <<'PY'
+          import json
+          import sys
+          import tarfile
+
+          bundle, plugin_id, version = sys.argv[1:]
+          with tarfile.open(bundle, "r:gz") as archive:
+              manifest = json.load(archive.extractfile(f"{plugin_id}/plugin.json"))
+              if manifest.get("id") != plugin_id:
+                  raise SystemExit(f"unexpected plugin id: {manifest.get('id')!r}")
+              if manifest.get("version") != version:
+                  raise SystemExit(
+                      f"bundle version {manifest.get('version')!r} does not match tag version {version!r}"
+                  )
+
+              expected = list(manifest["server"]["executables"].values())
+              expected.append(manifest["webapp"]["bundle_path"])
+              for path in expected:
+                  member = archive.getmember(f"{plugin_id}/{path}")
+                  if not member.isfile() or member.size == 0:
+                      raise SystemExit(f"missing or empty bundle file: {path}")
+
+              for platform, path in manifest["server"]["executables"].items():
+                  member = archive.getmember(f"{plugin_id}/{path}")
+                  if not member.mode & 0o111:
+                      raise SystemExit(f"server binary is not executable: {platform} -> {path}")
+          PY
+
+          sha256sum "$BUNDLE" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
       - uses: softprops/action-gh-release@v3
         if: steps.guard.outputs.on_main == 'true'
         with:
           name: "${{ github.ref_name }}"
           generate_release_notes: true
-          files: ${{ env.PLUGIN_ID }}-${{ needs.set-version.outputs.version }}.tar.gz
+          files: |
+            ${{ env.PLUGIN_ID }}-${{ needs.set-version.outputs.version }}.tar.gz
+            SHA256SUMS
