@@ -120,7 +120,7 @@ func (p *Plugin) requireIdentityGate(fp string, epoch uint64) error {
 	if e != nil {
 		return e
 	}
-	if !c.Enable || g.Status != "active" || g.Epoch != epoch || g.IdentityFingerprint != fp || fp != identityFingerprint(configuredIssuer(c), c.ClientID) {
+	if g.Status != "active" || g.Epoch != epoch || g.IdentityFingerprint != fp || fp != identityFingerprint(configuredIssuer(c), c.ClientID) {
 		return ErrIdentityGateClosed
 	}
 	return nil

@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +15,7 @@ import (
 
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/mux"
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"golang.org/x/oauth2"
 )
@@ -289,6 +293,15 @@ func (p *Plugin) retryOIDCProvider() {
 
 // ServeHTTP routes incoming HTTP requests to the plugin's router.
 func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api/v1/plane/disconnect" || r.URL.Path == "/api/v1/plane/revoke" {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		p.handleCredentialManagement(c, w, r, r.URL.Path == "/api/v1/plane/revoke")
+		return
+	}
 	p.router.ServeHTTP(w, r)
 }
 
@@ -348,4 +361,79 @@ func (p *Plugin) getOIDCProvider() *oidc.Provider {
 	p.configurationLock.RLock()
 	defer p.configurationLock.RUnlock()
 	return p.oidcProvider
+}
+
+// Only management routes require this ordinary session + explicit CSRF guard.
+// The Context/header pair is trusted only behind Mattermost's plugin dispatcher.
+func (p *Plugin) managementActor(c *plugin.Context, r *http.Request) (*model.User, error) {
+	id := r.Header.Get("Mattermost-User-Id")
+	if c == nil || !model.IsValidId(c.SessionId) || !model.IsValidId(id) {
+		return nil, ErrIdentityMismatch
+	}
+	session, ae := p.API.GetSession(c.SessionId)
+	if ae != nil || session == nil || session.Id != c.SessionId || session.UserId != id || session.IsExpired() || session.IsIntegration() {
+		return nil, ErrIdentityMismatch
+	}
+	csrf := r.Header.Get(model.HeaderCsrfToken)
+	if csrf == "" || session.GetCSRF() == "" || subtle.ConstantTimeCompare([]byte(csrf), []byte(session.GetCSRF())) != 1 {
+		return nil, ErrIdentityMismatch
+	}
+	user, ae := p.API.GetUser(id)
+	if ae != nil || user == nil || user.Id != id || user.DeleteAt != 0 || user.IsBot {
+		return nil, ErrIdentityMismatch
+	}
+	return user, nil
+}
+func (p *Plugin) handleCredentialManagement(c *plugin.Context, w http.ResponseWriter, r *http.Request, admin bool) {
+	actor, e := p.managementActor(c, r)
+	if e != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := actor.Id
+	if admin {
+		// Roles come from a fresh server GetUser, never from session/request claims.
+		if !actor.IsSystemAdmin() {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var target struct {
+			UserID string `json:"user_id"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&target) != nil || decoder.Decode(new(any)) != io.EOF || !model.IsValidId(target.UserID) {
+			http.Error(w, "invalid target", http.StatusBadRequest)
+			return
+		}
+		id = target.UserID
+	}
+	b, e := p.cleanupBinding(id)
+	if e != nil {
+		http.Error(w, "identity unavailable", http.StatusConflict)
+		return
+	}
+	if e = newTokenLifecycle(p).Disconnect(r.Context(), b); e != nil {
+		http.Error(w, "credential invalidation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Core invokes this asynchronously and does not guarantee durable delivery.
+// Broker use must independently reread the user even after successful cleanup.
+func (p *Plugin) UserHasBeenDeactivated(_ *plugin.Context, user *model.User) {
+	if user == nil {
+		return
+	}
+	b, e := p.cleanupBinding(user.Id)
+	if e != nil {
+		p.API.LogWarn("Delegated credential deactivation binding unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), refreshBudget)
+	defer cancel()
+	if e = newCredentialStore(p).Invalidate(ctx, b); e != nil {
+		p.API.LogWarn("Delegated credential deactivation invalidation unavailable")
+	}
 }

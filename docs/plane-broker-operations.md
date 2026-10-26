@@ -1,8 +1,8 @@
 # Encrypted delegated credentials
 
-This stage captures OIDC credentials for later server-side delegated access. It
-does not add a broker endpoint, refresh tokens, exchange tokens, or alter ordinary
-login scopes. In particular, do not request offline access merely to serve
+This stage captures OIDC credentials and serializes refresh/disconnect for later
+server-side delegated access. It does not add the broker/exchange endpoint or
+alter ordinary login scopes. In particular, do not request offline access merely to serve
 `/plane tasks`. Production requires its own provider capability proof.
 
 ## Enable capture
@@ -56,8 +56,9 @@ digests of issuer and Mattermost UUID. The clear envelope exposes format/key ID,
 concurrency state, nonce and ciphertext only, never email or raw subject.
 
 The envelope is a single CAS-controlled `ready`, `refreshing`, or `invalidated`
-record with a monotonic generation and owner. `refreshing` is reserved for the
-later refresh lifecycle. Capture first durably advances to an invalidated
+record with a monotonic generation and owner. Refreshing records also expose
+authenticated start/deadline and optional nonissuing candidate phase. Capture
+first durably advances to an invalidated
 generation, then encrypts and publishes against those exact owner/generation
 bytes. Invalidation advances the same counter and needs neither a decrypt key,
 an active identity gate nor an active user. Do not delete/reset tombstones or
@@ -86,8 +87,8 @@ persistent gate or makes legacy mappings authoritative.
 provider-specific relative expiry, accepted only as a positive integer of at
 most ten years. Its absence, zero or malformed value leaves `RefreshExpiresAt`
 zero, meaning unknown, not unlimited. Providers may still revoke tokens sooner.
-Unknown expiry cannot justify using a refresh token forever; the later lifecycle
-must enforce its own conservative refresh/reconnect policy.
+Unknown expiry does not prove unlimited validity. The lifecycle refreshes once
+when needed and requires reconnect after any rejected or ambiguous refresh.
 
 ## Rotate or lose a key
 
@@ -120,8 +121,120 @@ with an administrative change. If core session revocation fails, the callback
 withholds the token and logs a generic failure; operators must investigate the
 unreleased session. Token consumers must reassert authority at use/release.
 
-The later lifecycle owns rotating-refresh exclusion, crash/response ambiguity
+The lifecycle below owns rotating-refresh exclusion, crash/response ambiguity
 and token revocation. The later broker owns caller authentication, durable
 replay checks, exact audience/scope exchange and release of only a short-lived
 `plane-api` token. PluginHTTP alone is not caller authentication. This stage's
 internal store methods are not public authorization interfaces.
+
+
+## Distributed refresh and deadline semantics
+
+`TokenLifecycle.UserAccessToken` and `AssertGeneration` are internal interfaces,
+not caller authentication. A token value is excluded from JSON and ordinary Go
+formatting. B3 must still authenticate its server caller, constrain exchange,
+and reassert generation and identity before release. It must not issue from a
+raw user ID or a PluginHTTP call alone.
+
+The lifecycle rereads the current Mattermost user (including `DeleteAt`, bot
+status and exact native auth binding), both integration switches and B0 authority
+before use/refresh and before returning. Tokens with at most 30 seconds left are
+refreshed. Known expired refresh credentials require reconnect. Two nodes share
+one durable CAS authority, without a process-wide user mutex:
+
+1. `ready(v)` becomes authenticated `refreshing(v, owner, started_at, deadline)`.
+   Only the CAS winner sends a refresh POST, with the old refresh token once.
+2. A successful response must include a new refresh token, bearer access token
+   and valid expiry. There is no provider-supported omission proof in the spike;
+   an omitted replacement, `invalid_grant`, response loss, timeout, malformed or
+   oversized response requires reconnect. There is no refresh/auth-style retry.
+3. Exact owner bytes become `refreshing(v+1, phase=candidate)` containing the new
+   encrypted credentials. This is nonissuing through both store and lifecycle.
+   Only a successful acknowledgement within the original absolute budget,
+   followed by current identity/config checks, permits construction of the
+   authenticated final `ready(v+1)` bytes. No replacement/resumed process may
+   promote an abandoned candidate.
+4. Final CAS compares the exact candidate bytes. Tombstones and newer captures
+   fence all late owners. Expired/abandoned refreshing/candidate state advances
+   to a tombstone, never to an owner replaying the old refresh token. Cleanup is
+   exact-owned and preserves a newer login's generation.
+
+Refresh, discovery and waiter polling share an absolute maximum ten-second
+budget (or the caller's earlier deadline). Waiters use bounded backoff, observe
+the owner's stored deadline, and honor request cancellation. SDK KV calls have
+no context argument: a blocked RPC cannot be hard-cancelled, and this is not a
+wall-clock bound on blocked SDK operations. A delayed candidate acknowledgement
+cannot create usable final bytes. Final-ready bytes are constructed only after
+an on-time durable candidate acknowledgement; a delayed final CAS therefore
+contains an already confirmed rotation, unlike an ambiguous refresh/candidate.
+The late caller still denies and exact-cleans its publication. Another caller
+can observe that confirmed rotation before cleanup if no tombstone won first.
+There is no claim that the physical final KV write always precedes the deadline.
+
+Provider transport is discovered per refresh under that same budget from the
+validated HTTPS issuer, client ID and secret, with exact issuer equality,
+configuration revision/equality checks and B0 authority checks before/after the
+network operation. It does not reuse or publish the interactive-login cache.
+Responses are limited to 64 KiB and redirects are refused for discovery,
+refresh and revoke. The pinned Keycloak deployment must support
+`client_secret_post`; this is the authentication method proven by its spike.
+The implementation does not automatically probe/retry other authentication
+styles. It requests neither extra scopes nor offline access.
+
+`Enable=false` disables interactive OIDC login but is not a delegated-use gate.
+Both delegated switches and the active approved B0 identity gate remain required.
+A frozen gate, issuer/client mismatch, lost key or inactive user still denies.
+Disabling login does not thaw or create identity mappings.
+
+## Disconnect, administrator revocation and deactivation
+
+Management endpoints are POST only under `/plugins/mattermost-oidc`:
+
+* `/api/v1/plane/disconnect` invalidates the authenticated user's credential.
+  User IDs in a query/body/cookie are not self authority.
+* `/api/v1/plane/revoke` takes exactly `{"user_id":"<Mattermost UUID>"}` in a
+  bounded JSON body. The UUID selects the target only. The actor must have a
+  current server-resolved `system_admin` role.
+
+Both require core-supplied `plugin.Context.SessionId` and `Mattermost-User-Id`,
+a matching current, nonexpired, nonintegration session resolved by session ID,
+and a current active nonbot user. `X-CSRF-Token` must be nonempty and match the
+nonempty session CSRF value in constant time. This applies even to ordinary
+sessions transported in Authorization. Native-password and OIDC human sessions
+qualify; bot, PAT and OAuth integration sessions do not. Form-only CSRF,
+`X-Requested-With`, browser user cookies and user headers without a core session
+cannot substitute. This proves session possession, not physical human action
+or recent reauthentication. Other public login/config routes retain their
+existing boundary; the later server broker will use its own HMAC guard.
+
+Local invalidation completes before best-effort remote refresh-token revocation.
+Provider failure/timeout cannot restore local credentials or make a successful
+local disconnect fail. Loading a token for remote revocation remains subject to
+normal issuance rules; a frozen gate, missing decrypt key, inactive/native-changed
+account, or in-progress refresh can make that token unavailable, so remote revoke
+is skipped. There is no cleanup decryption bypass. Local invalidation never
+requires provider availability, active gate or encryption keys.
+
+Cleanup locates the original bound issuer/subject using corroborated committed
+B0 forward/reverse records. It can invalidate frozen/deactivated identities and
+never relabels a slot with the current configured issuer. Missing, pending or
+contradictory registry records produce a generic explicit failure; operators
+must repair/reconcile the registry rather than guess from email/raw subject.
+
+`UserHasBeenDeactivated` performs best-effort local invalidation. On Mattermost
+core v12.0.1 the hook is scheduled asynchronously after persistence/session
+revocation, has no evidenced durable retry, and can be omitted by intervening
+failures and bulk guest paths. Broker use independently rereads inactivity and
+attempts cleanup before issuance-gate checks. Failed/missing hook delivery never
+authorizes an inactive user. Neither hook nor rereads make deactivation atomic
+with token release, and there is no universal cleanup guarantee. Deployments
+requiring cleanup across skipped/bulk paths must explicitly revoke through the
+management endpoint before reactivation. No Mattermost core patch or polling
+identity registry is installed.
+
+Ordinary device logout leaves other sessions and delegated credentials intact.
+Use explicit disconnect/revoke to invalidate delegated access. A fresh verified
+OIDC login may reconnect by publishing a strictly later generation; no tombstone
+counter may be reset. Tests use synthetic in-process TLS and shared fake durable
+KV. This stage does not establish installed-runtime capture, backup handling or
+B3/G2 deployment acceptance; the historical local fixture remains frozen.

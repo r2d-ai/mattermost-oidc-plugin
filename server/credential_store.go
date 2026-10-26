@@ -46,6 +46,9 @@ type credentialEnvelope struct {
 	State      string `json:"state"`
 	Generation uint64 `json:"generation"`
 	Owner      string `json:"owner"`
+	StartedAt  int64  `json:"started_at,omitempty"`
+	Deadline   int64  `json:"deadline,omitempty"`
+	Phase      string `json:"phase,omitempty"`
 	Nonce      []byte `json:"nonce,omitempty"`
 	Ciphertext []byte `json:"ciphertext,omitempty"`
 }
@@ -194,7 +197,11 @@ func (s *CredentialStore) abandonPublication(ctx context.Context, b IdentityBind
 func credentialAAD(env credentialEnvelope, b IdentityBinding, epoch, revision uint64) []byte {
 	// Gate epoch and revision stay inside ciphertext; current B0 authority supplies
 	// their expected values on decrypt. Binding prevents moving ciphertext slots.
-	aad, _ := json.Marshal([]any{"mm-oidc-credential-envelope-v1", env.Format, env.KeyID, env.State, env.Generation, env.Owner, b, epoch, revision})
+	material := []any{"mm-oidc-credential-envelope-v1", env.Format, env.KeyID, env.State, env.Generation, env.Owner, b, epoch, revision}
+	if env.StartedAt != 0 || env.Deadline != 0 || env.Phase != "" {
+		material = append(material, env.StartedAt, env.Deadline, env.Phase)
+	}
+	aad, _ := json.Marshal(material)
 	return aad
 }
 
@@ -332,4 +339,33 @@ func (s *CredentialStore) Load(ctx context.Context, binding IdentityBinding) (St
 		return empty, ErrCredentialsUnavailable
 	}
 	return c, nil
+}
+
+// sealTransition authenticates lifecycle state/deadline changes with fresh nonces.
+// It never publishes or advances the single durable generation on its own.
+func (s *CredentialStore) sealTransition(c StoredCredentials, env credentialEnvelope) (credentialEnvelope, []byte, error) {
+	active, keys, err := credentialKeyring()
+	if err != nil {
+		return env, nil, err
+	}
+	aead, err := credentialAEAD(keys[active])
+	if err != nil {
+		return env, nil, ErrCredentialsUnavailable
+	}
+	env.KeyID = active
+	env.Nonce = make([]byte, aead.NonceSize())
+	if _, err = rand.Read(env.Nonce); err != nil {
+		return env, nil, ErrCredentialsUnavailable
+	}
+	c.Version = env.Generation
+	plain, err := json.Marshal(c)
+	if err != nil {
+		return env, nil, ErrCredentialsUnavailable
+	}
+	env.Ciphertext = aead.Seal(nil, env.Nonce, plain, credentialAAD(env, c.Binding, c.GateEpoch, c.BindingRevision))
+	raw, err := json.Marshal(env)
+	if err != nil || len(raw) > maxCredentialRecord {
+		return env, nil, ErrCredentialsUnavailable
+	}
+	return env, raw, nil
 }
