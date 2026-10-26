@@ -41,7 +41,10 @@ type Plugin struct {
 	configurationLock sync.RWMutex
 
 	// configuration is the active plugin configuration.
-	configuration *Configuration
+	configuration         *Configuration
+	configurationRevision uint64
+	loginSnapshot         *LoginSnapshot
+	readApprovalFile      func() ([]byte, error)
 
 	// encryptionKey is the HMAC key used to sign OAuth state tokens.
 	// Loaded from the KV store on activation; never exposed via config or UI.
@@ -71,26 +74,17 @@ type Plugin struct {
 
 // OnActivate is called when the plugin is activated.
 func (p *Plugin) OnActivate() error {
-	// Load or generate the HMAC signing key from the KV store.
-	// The key is kept out of plugin config and the System Console entirely.
-	if keyBytes, err := p.API.KVGet(kvEncryptionKey); err != nil {
-		return fmt.Errorf("failed to load encryption key from KV store: %w", err)
-	} else if len(keyBytes) > 0 {
-		p.encryptionKey = string(keyBytes)
-	} else {
-		key, err := generateRandomKey(32)
-		if err != nil {
-			return fmt.Errorf("failed to generate encryption key: %w", err)
-		}
-		if err := p.API.KVSet(kvEncryptionKey, []byte(key)); err != nil {
-			return fmt.Errorf("failed to persist encryption key: %w", err)
-		}
-		p.encryptionKey = key
+	if err := p.initializeStateKey(); err != nil {
+		return err
 	}
 
 	p.initRouter()
+	if err := p.registerIdentityCommand(); err != nil {
+		return err
+	}
 
 	cfg := p.getConfiguration()
+	_, _ = p.observeIdentityGate(cfg)
 	if cfg.Enable {
 		if err := cfg.IsValid(); err != nil {
 			p.API.LogWarn("OIDC plugin configuration is incomplete", "error", err.Error())
@@ -132,6 +126,7 @@ func (p *Plugin) OnConfigurationChange() error {
 	}
 
 	p.setConfiguration(&configuration)
+	_, _ = p.observeIdentityGate(&configuration)
 	p.clearOIDCProvider() // clear old config to prevent stale, outdated config in case the newly saved one is invalid
 
 	if configuration.Enable {
@@ -163,7 +158,8 @@ func (p *Plugin) setConfiguration(configuration *Configuration) {
 	p.configurationLock.Lock()
 	defer p.configurationLock.Unlock()
 
-	p.configuration = configuration
+	p.configuration = configuration.Clone()
+	p.configurationRevision++
 }
 
 // clearOIDCProvider resets the cached provider, OAuth2 configuration, and verifier.
@@ -171,6 +167,7 @@ func (p *Plugin) clearOIDCProvider() {
 	p.configurationLock.Lock()
 	defer p.configurationLock.Unlock()
 
+	p.loginSnapshot = nil
 	p.oidcProvider = nil
 	p.oauth2Config = nil
 	p.oidcVerifier = nil
@@ -178,7 +175,14 @@ func (p *Plugin) clearOIDCProvider() {
 
 // initOIDCProvider discovers and initializes the OIDC provider, OAuth2 config, and verifier.
 func (p *Plugin) initOIDCProvider() error {
-	config := p.getConfiguration()
+	p.configurationLock.RLock()
+	config := p.configuration.Clone()
+	revision := p.configurationRevision
+	key := p.encryptionKey
+	p.configurationLock.RUnlock()
+	if key == "" {
+		return nil
+	} // OnConfigurationChange may precede activation.
 	if err := config.IsValid(); err != nil {
 		return err
 	}
@@ -223,11 +227,12 @@ func (p *Plugin) initOIDCProvider() error {
 
 	p.configurationLock.Lock()
 	// A configuration saved during discovery gets its own OnConfigurationChange, so this result is stale.
-	stale := p.configuration == nil || *p.configuration != *config
+	stale := p.configuration == nil || p.configurationRevision != revision || p.encryptionKey != key || *p.configuration != *config
 	if !stale {
 		p.oidcProvider = provider
 		p.oauth2Config = oauthConfig
 		p.oidcVerifier = verifier
+		p.loginSnapshot = makeLoginSnapshot(config, provider, verifier, oauthConfig, key)
 	}
 	p.configurationLock.Unlock()
 	if stale {

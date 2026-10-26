@@ -23,7 +23,7 @@ type Configuration struct {
 	EmailVerifiedClaim   string `json:"EmailVerifiedClaim"`
 	RequireEmailVerified bool   `json:"RequireEmailVerified"`
 	AutoCreateAccounts   bool   `json:"AutoCreateAccounts"`
-	AutoLinkByEmail      bool   `json:"AutoLinkByEmail"`
+	AutoLinkByEmail      bool   `json:"AutoLinkByEmail"` // Deprecated: decoded for compatibility; never grants ownership.
 	DefaultTeam          string `json:"DefaultTeam"`
 }
 

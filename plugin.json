@@ -134,9 +134,9 @@
             },
             {
                 "key": "AutoLinkByEmail",
-                "display_name": "Auto-Link Existing Accounts by Email",
+                "display_name": "Auto-link by email (unsupported)",
                 "type": "bool",
-                "help_text": "When enabled, existing accounts will be automatically linked to OIDC on first login if the email matches. Warning: this will override any existing auth provider (LDAP, SAML, etc.) for matching accounts.",
+                "help_text": "Ignored. Identity ownership requires an approved issuer/subject binding. Email is profile data only.",
                 "default": false
             },
             {

@@ -1,12 +1,22 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	oidc "github.com/coreos/go-oidc/v3/oidc"
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
@@ -659,6 +669,10 @@ func newDiscoveryTestPlugin(t *testing.T, up *atomic.Bool, hits *atomic.Int32, o
 	api := &plugintest.API{}
 	api.On("GetConfig").Return(&model.Config{ServiceSettings: model.ServiceSettings{SiteURL: model.NewPointer("https://mm.example.com")}})
 	api.On("KVSetWithExpiry", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	gateBytes, _ := json.Marshal(identityGate{Version: 1, Status: "active", Epoch: 2, Issuer: issuer, ClientID: "mattermost", IdentityFingerprint: identityFingerprint(issuer, "mattermost")})
+	api.On("KVGet", identityGateKey).Return(gateBytes, nil)
+	api.On("KVCompareAndSet", identityGateKey, mock.Anything, mock.Anything).Return(true, nil)
+	api.On("RegisterCommand", mock.Anything).Return(nil)
 
 	p := &Plugin{encryptionKey: "test-key", discoveryClient: idp.Client()}
 	p.SetAPI(quietAPI{api})
@@ -692,8 +706,8 @@ func TestConnectRetriesDiscoveryAtMostOncePerInterval(t *testing.T) {
 	for range 3 {
 		rec := httptest.NewRecorder()
 		p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("got %d while the issuer is down, want 500", rec.Code)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("got %d while the issuer is down, want 503", rec.Code)
 		}
 	}
 	if got := hits.Load(); got != 2 {
@@ -713,8 +727,8 @@ func TestConnectDoesNotRetryInvalidConfiguration(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
 
-	if rec.Code != http.StatusInternalServerError || hits.Load() != 0 {
-		t.Fatalf("got %d after %d discovery calls, want 500 and none", rec.Code, hits.Load())
+	if rec.Code != http.StatusServiceUnavailable || hits.Load() != 0 {
+		t.Fatalf("got %d after %d discovery calls, want 503 and none", rec.Code, hits.Load())
 	}
 }
 
@@ -774,8 +788,8 @@ func TestOnConfigurationChangeDiscardsOldProviderOnInvalidConfig(t *testing.T) {
 	// Login attempt must fail fast with 500, not redirect to the old provider.
 	rec := httptest.NewRecorder()
 	p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("got status %d, want 500", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got status %d, want 503", rec.Code)
 	}
 }
 
@@ -843,8 +857,8 @@ func TestOnConfigurationChangeDiscardsOldProviderOnFailedDiscovery(t *testing.T)
 	newUp.Store(true)
 	rec := httptest.NewRecorder()
 	p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
-	if rec.Code != http.StatusFound || !strings.HasPrefix(rec.Header().Get("Location"), newIssuer+"/auth?") {
-		t.Fatalf("got %d to %q, want redirect to new issuer %s", rec.Code, rec.Header().Get("Location"), newIssuer)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("changed issuer must require explicit activation, got %d", rec.Code)
 	}
 }
 
@@ -1019,5 +1033,129 @@ func TestOnActivateAndConfigChangeDoNotRedundantlyInitProvider(t *testing.T) {
 	}
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("discovery hits after changed OnConfigurationChange = %d, want 2", got)
+	}
+}
+
+// Runs the complete callback against a signed TLS OIDC provider. Tokens remain in
+// test memory; mutation counters prove failures happen before account/session effects.
+func TestOAuth2CompleteCallback(t *testing.T) {
+	for _, mode := range []string{"web", "popup", "mobile", "secret_fresh", "secret_before", "secret_during", "wrong_userinfo", "wrong_nonce", "missing_cookie", "epoch_before"} {
+		t.Run(mode, func(t *testing.T) {
+			key, e := rsa.GenerateKey(rand.Reader, 2048)
+			require.NoError(t, e)
+			signer, e := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, nil)
+			require.NoError(t, e)
+			var issuer, nonce, challenge string
+			exchanges := 0
+			var p *Plugin
+			idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/.well-known/openid-configuration":
+					_ = json.NewEncoder(w).Encode(map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/auth", "token_endpoint": issuer + "/token", "userinfo_endpoint": issuer + "/userinfo", "jwks_uri": issuer + "/keys"})
+				case "/keys":
+					_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, Algorithm: "RS256", Use: "sig"}}})
+				case "/userinfo":
+					sub := "s"
+					if mode == "wrong_userinfo" {
+						sub = "other"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"sub": sub})
+				case "/token":
+					exchanges++
+					_ = r.ParseForm()
+					sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+					require.Equal(t, challenge, base64.RawURLEncoding.EncodeToString(sum[:]))
+					if mode == "secret_during" {
+						cfg := p.getConfiguration()
+						cfg.ClientSecret = "rotated"
+						p.setConfiguration(cfg)
+					}
+					signedNonce := nonce
+					if mode == "wrong_nonce" {
+						signedNonce = "other"
+					}
+					claims, _ := json.Marshal(map[string]any{"iss": issuer, "sub": "s", "aud": "client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": signedNonce, "email": "callback@example.com", "preferred_username": "callback", "email_verified": true})
+					obj, e := signer.Sign(claims)
+					require.NoError(t, e)
+					jwt, e := obj.CompactSerialize()
+					require.NoError(t, e)
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "test-access", "token_type": "Bearer", "id_token": jwt})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer idp.Close()
+			issuer = idp.URL
+			a := newIdentityAPI()
+			p = &Plugin{encryptionKey: "shared-key", discoveryClient: idp.Client()}
+			p.SetAPI(a)
+			p.setConfiguration(&Configuration{Enable: true, IssuerURL: issuer, ClientID: "client", ClientSecret: "secret", AutoCreateAccounts: true, EmailClaim: "email", UsernameClaim: "preferred_username", EmailVerifiedClaim: "email_verified", RequireEmailVerified: true})
+			a.kv[identityGateKey], _ = json.Marshal(identityGate{Version: 1, Status: "active", Epoch: 2, Issuer: issuer, ClientID: "client", IdentityFingerprint: identityFingerprint(issuer, "client")})
+			require.NoError(t, p.initOIDCProvider())
+			if mode == "secret_fresh" {
+				cfg := p.getConfiguration()
+				cfg.ClientSecret = "rotated"
+				p.setConfiguration(cfg)
+				require.NoError(t, p.initOIDCProvider())
+			}
+			target := "/oauth2/connect"
+			if mode == "popup" {
+				target += "?popup=1"
+			}
+			if mode == "mobile" {
+				target += "?mobile_redirect=mmauth%3A%2F%2Fcallback"
+			}
+			start := httptest.NewRecorder()
+			p.handleOAuth2Connect(start, httptest.NewRequest("GET", target, nil))
+			require.Equal(t, 302, start.Code)
+			location, e := url.Parse(start.Header().Get("Location"))
+			require.NoError(t, e)
+			nonce = location.Query().Get("nonce")
+			challenge = location.Query().Get("code_challenge")
+			require.NotEmpty(t, nonce)
+			require.Equal(t, "S256", location.Query().Get("code_challenge_method"))
+			require.NotContains(t, location.RawQuery, "fingerprint")
+			if mode == "secret_before" {
+				cfg := p.getConfiguration()
+				cfg.ClientSecret = "rotated"
+				p.setConfiguration(cfg)
+				require.NoError(t, p.initOIDCProvider())
+			}
+			if mode == "epoch_before" {
+				_, e = p.freezeIdentityGate()
+				require.NoError(t, e)
+			}
+			req := httptest.NewRequest("GET", "/oauth2/callback?code=fixture&state="+url.QueryEscape(location.Query().Get("state")), nil).WithContext(oidc.ClientContext(context.Background(), idp.Client()))
+			if mode != "missing_cookie" {
+				for _, cookie := range start.Result().Cookies() {
+					req.AddCookie(cookie)
+				}
+			}
+			finish := httptest.NewRecorder()
+			p.handleOAuth2Callback(finish, req)
+			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh"
+			if success {
+				require.Equal(t, 1, a.sessions)
+				require.Equal(t, 1, a.creates)
+				for _, u := range a.users {
+					require.Equal(t, "oidc", u.AuthService)
+					require.Len(t, *u.AuthData, 67)
+				}
+				if mode == "web" || mode == "secret_fresh" {
+					require.Equal(t, 302, finish.Code)
+				} else {
+					require.Equal(t, 200, finish.Code)
+				}
+				if mode == "mobile" {
+					require.Contains(t, finish.Body.String(), "MMAUTHTOKEN")
+				}
+			} else {
+				require.Zero(t, a.sessions+a.creates+a.updates)
+				if mode == "secret_before" || mode == "missing_cookie" || mode == "epoch_before" {
+					require.Zero(t, exchanges)
+				}
+			}
+		})
 	}
 }
