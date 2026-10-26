@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
@@ -25,6 +26,7 @@ type identityAPI struct {
 	creates, updates, sessions, joins int
 	readFail, loseCreate              bool
 	failKey                           string
+	beforeCAS                         func(string, []byte, []byte) *model.AppError
 }
 
 func newIdentityAPI() *identityAPI {
@@ -41,6 +43,11 @@ func (a *identityAPI) KVGet(k string) ([]byte, *model.AppError) {
 	return bytes.Clone(a.kv[k]), nil
 }
 func (a *identityAPI) KVCompareAndSet(k string, old, next []byte) (bool, *model.AppError) {
+	if a.beforeCAS != nil {
+		if err := a.beforeCAS(k, old, next); err != nil {
+			return false, err
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.failKey != "" && strings.HasPrefix(k, a.failKey) {
@@ -232,18 +239,103 @@ func TestConcurrentPairResolution(t *testing.T) {
 	q := &Plugin{encryptionKey: "test-shared-key"}
 	q.SetAPI(a)
 	q.setConfiguration(p.getConfiguration())
-	var wg sync.WaitGroup
+	copySnapshot := *s
+	q.loginSnapshot = &copySnapshot
+	// Both nodes must pass the same snapshot/gate boundary before contention.
+	snapshots := map[*Plugin]*LoginSnapshot{}
 	for _, node := range []*Plugin{p, q} {
-		wg.Add(1)
-		go func(node *Plugin) { defer wg.Done(); _, _, _ = resolveTest(node, s) }(node)
+		snapshot, err := node.currentLoginSnapshot(context.Background())
+		require.NoError(t, err)
+		snapshots[node] = snapshot
 	}
-	wg.Wait()
-	r, u, err := resolveTest(p, s)
-	require.NoError(t, err)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	key := pairKey(IdentityBinding{Issuer: "https://a.example", Subject: "s"})
+	a.beforeCAS = func(k string, old, next []byte) *model.AppError {
+		if k == key && len(old) == 0 {
+			entered <- struct{}{}
+			<-release
+		}
+		return nil
+	}
+	type outcome struct {
+		node    *Plugin
+		binding ResolvedIdentity
+		user    *model.User
+		err     error
+	}
+	results := make(chan outcome, 2)
+	for _, node := range []*Plugin{p, q} {
+		go func(node *Plugin) {
+			r, u, err := resolveTest(node, snapshots[node])
+			results <- outcome{node, r, u, err}
+		}(node)
+	}
+	// Each callback blocks at its initial absent->reserved CAS. One goroutine
+	// cannot produce both arrivals because neither may complete that CAS yet.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case result := <-results:
+			t.Fatalf("node returned before both reservation CAS attempts: %v", result.err)
+		case <-time.After(3 * time.Second):
+			t.Fatal("both nodes did not reach reservation CAS")
+		}
+	}
+	unblock()
+	initial := make([]outcome, 0, 2)
+	for i := 0; i < 2; i++ {
+		select {
+		case result := <-results:
+			initial = append(initial, result)
+		case <-time.After(3 * time.Second):
+			t.Fatal("callback did not complete after reservation release")
+		}
+	}
+	successes := 0
+	for _, result := range initial {
+		if result.err == nil {
+			successes++
+		} else {
+			// A callback may observe a persisted create attempt before core creation
+			// returns. Only the documented ambiguous/pending conflict is retryable here.
+			require.ErrorIs(t, result.err, ErrIdentityConflict)
+			require.Nil(t, result.user)
+		}
+	}
+	require.GreaterOrEqual(t, successes, 1)
+	var expected ResolvedIdentity
+	for _, result := range initial {
+		// Both initial callbacks have now completed; retries are bounded and every
+		// result is checked. No missing-snapshot/store error is silently discarded.
+		for attempt := 0; result.err != nil && attempt < 3; attempt++ {
+			result.binding, result.user, result.err = resolveTest(result.node, snapshots[result.node])
+			if result.err != nil {
+				require.ErrorIs(t, result.err, ErrIdentityConflict)
+			}
+		}
+		require.NoError(t, result.err)
+		require.NotNil(t, result.user)
+		require.Equal(t, result.binding.Binding.MattermostUserID, result.user.Id)
+		require.NoError(t, result.node.AssertCurrentBinding(context.Background(), result.binding))
+		if expected.Binding.MattermostUserID == "" {
+			expected = result.binding
+		} else {
+			require.Equal(t, expected, result.binding)
+		}
+	}
 	require.Equal(t, 1, a.creates)
-	other, err := q.ResolveBrokerBinding(context.Background(), u.Id)
+	require.Len(t, a.users, 1)
+	forward, _, err := p.readIdentityRecord(key)
 	require.NoError(t, err)
-	require.Equal(t, r, other)
+	reverse, _, err := q.readIdentityRecord(identityUserPrefix + expected.Binding.MattermostUserID)
+	require.NoError(t, err)
+	require.Equal(t, "committed", forward.State)
+	require.Equal(t, forward, reverse)
+	require.Equal(t, expected.Binding, forward.Binding)
 }
 func TestCreateResponseLostResumesSameUser(t *testing.T) {
 	p, a, s := fixtureIdentity(t)

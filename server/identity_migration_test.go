@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -136,4 +137,81 @@ func TestApplyCannotApproveBrokenCommittedReverse(t *testing.T) {
 	require.NoError(t, p.applyApprovalMap(h))
 	delete(a.kv, identityUserPrefix+m.Rows[0].MattermostUserID)
 	require.Error(t, p.applyApprovalMap(h))
+}
+
+func TestIdentityApplyPartialResumeAfterReverseCommit(t *testing.T) {
+	p, a, m := legacyMap(t)
+	b, h := mapBytes(t, m)
+	p.readApprovalFile = func() ([]byte, error) { return b, nil }
+	row := m.Rows[0]
+	binding := IdentityBinding{Issuer: row.Issuer, Subject: row.Subject, MattermostUserID: row.MattermostUserID}
+	forwardKey, reverseKey := pairKey(binding), identityUserPrefix+row.MattermostUserID
+	failedForwardWrites := 0
+	a.beforeCAS = func(k string, old, next []byte) *model.AppError {
+		if k != forwardKey {
+			return nil
+		}
+		var previous, proposed identityRecord
+		if json.Unmarshal(old, &previous) == nil && json.Unmarshal(next, &proposed) == nil && previous.State == "pending" && proposed.State == "committed" {
+			failedForwardWrites++
+			return failAPI()
+		}
+		return nil
+	}
+	require.ErrorIs(t, p.applyApprovalMap(h), ErrIdentityUnavailable)
+	require.Equal(t, 1, failedForwardWrites)
+	forward, forwardBytes, e := p.readIdentityRecord(forwardKey)
+	require.NoError(t, e)
+	reverse, reverseBytes, e := p.readIdentityRecord(reverseKey)
+	require.NoError(t, e)
+	require.Equal(t, "pending", forward.State)
+	require.Equal(t, "committed", reverse.State)
+	require.Equal(t, binding, forward.Binding)
+	require.Equal(t, binding, reverse.Binding)
+	require.Equal(t, importTransaction(h, 0), forward.TransactionID)
+	require.Equal(t, forward.TransactionID, reverse.TransactionID)
+	require.Equal(t, forward.Revision, reverse.Revision)
+	expected := forward
+	expected.State = "committed"
+	require.Equal(t, expected, reverse)
+	g, gateBefore, e := p.readIdentityGate()
+	require.NoError(t, e)
+	require.Equal(t, "frozen", g.Status)
+	require.Equal(t, m.ExpectedGateEpoch, g.Epoch)
+	require.Empty(t, g.ApprovedMapSHA256)
+	require.Nil(t, g.MaintenanceReceipt)
+	// The registry itself denies the partial commit, independently of the gate.
+	_, _, e = p.committedIdentity(binding)
+	require.ErrorIs(t, e, ErrIdentityConflict)
+	require.ErrorIs(t, p.AssertCurrentBinding(context.Background(), resolved(reverse, g)), ErrIdentityGateClosed)
+	_, e = p.ResolveBrokerBinding(context.Background(), row.MattermostUserID)
+	require.ErrorIs(t, e, ErrIdentityGateClosed)
+	require.Error(t, p.activateApprovalMap(h))
+	require.Equal(t, forwardBytes, a.kv[forwardKey])
+	require.Equal(t, reverseBytes, a.kv[reverseKey])
+	require.Equal(t, gateBefore, a.kv[identityGateKey])
+	require.Zero(t, a.creates+a.updates+a.sessions)
+	// Resume exactly the original document/transaction; the occupied committed
+	// reverse entry must remain byte-for-byte unchanged while forward completes.
+	a.beforeCAS = nil
+	require.NoError(t, p.applyApprovalMap(h))
+	committed, committedBytes, e := p.readIdentityRecord(forwardKey)
+	require.NoError(t, e)
+	require.Equal(t, expected, committed)
+	require.Equal(t, reverseBytes, a.kv[reverseKey])
+	appliedGate := bytes.Clone(a.kv[identityGateKey])
+	require.NoError(t, p.applyApprovalMap(h))
+	require.Equal(t, committedBytes, a.kv[forwardKey])
+	require.Equal(t, reverseBytes, a.kv[reverseKey])
+	require.Equal(t, appliedGate, a.kv[identityGateKey])
+	require.NoError(t, p.activateApprovalMap(h))
+	activeGate := bytes.Clone(a.kv[identityGateKey])
+	require.NoError(t, p.activateApprovalMap(h))
+	require.Equal(t, activeGate, a.kv[identityGateKey])
+	resolvedBinding, e := p.ResolveBrokerBinding(context.Background(), row.MattermostUserID)
+	require.NoError(t, e)
+	require.Equal(t, binding, resolvedBinding.Binding)
+	require.Equal(t, forward.Revision, resolvedBinding.BindingRevision)
+	require.NoError(t, p.AssertCurrentBinding(context.Background(), resolvedBinding))
+	require.Zero(t, a.creates+a.updates+a.sessions)
 }

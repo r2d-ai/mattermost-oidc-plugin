@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/stretchr/testify/require"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSecretRotationOnlyInvalidatesCallback(t *testing.T) {
@@ -136,4 +139,76 @@ func TestStateKeyDefersEarlyPublication(t *testing.T) {
 	require.NoError(t, p.initOIDCProvider())
 	require.NotNil(t, p.loginSnapshot)
 	require.Equal(t, int32(1), hits.Load())
+}
+
+func TestCallbackSameRevisionDiscoveryCannotPublishOlderResult(t *testing.T) {
+	firstStarted, secondStarted := make(chan struct{}), make(chan struct{})
+	releaseFirst, releaseSecond := make(chan struct{}), make(chan struct{})
+	var firstOnce, secondOnce sync.Once
+	unblockFirst := func() { firstOnce.Do(func() { close(releaseFirst) }) }
+	unblockSecond := func() { secondOnce.Do(func() { close(releaseSecond) }) }
+	var requests atomic.Int32
+	var issuer string
+	idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		suffix := "newer"
+		if requests.Add(1) == 1 {
+			suffix = "older"
+			close(firstStarted)
+			<-releaseFirst
+		} else {
+			close(secondStarted)
+			<-releaseSecond
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/auth/" + suffix, "token_endpoint": issuer + "/token/" + suffix, "userinfo_endpoint": issuer + "/userinfo/" + suffix, "jwks_uri": issuer + "/keys/" + suffix})
+	}))
+	t.Cleanup(idp.Close)
+	t.Cleanup(func() { unblockFirst(); unblockSecond() })
+	issuer = idp.URL
+	p, a, _ := fixtureIdentity(t)
+	cfg := p.getConfiguration()
+	cfg.IssuerURL = issuer
+	p.setConfiguration(cfg)
+	a.kv[identityGateKey], _ = json.Marshal(identityGate{Version: 1, Status: "active", Epoch: 2, Issuer: issuer, ClientID: cfg.ClientID, IdentityFingerprint: identityFingerprint(issuer, cfg.ClientID)})
+	p.discoveryClient = idp.Client()
+	p.clearOIDCProvider()
+	oldResult := make(chan error, 1)
+	go func() { oldResult <- p.initOIDCProvider() }()
+	select {
+	case <-firstStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first discovery did not start")
+	}
+	// Simulate direct lifecycle discovery overlapping the login retry entrypoint.
+	retryFinished := make(chan struct{})
+	go func() { p.retryOIDCProvider(); close(retryFinished) }()
+	select {
+	case <-secondStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second discovery did not start")
+	}
+	unblockSecond()
+	select {
+	case <-retryFinished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("newer discovery did not finish")
+	}
+	newer, err := p.currentLoginSnapshot(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, issuer+"/auth/newer", newer.oauth.Endpoint.AuthURL)
+	unblockFirst()
+	select {
+	case err = <-oldResult:
+	case <-time.After(3 * time.Second):
+		t.Fatal("older discovery did not return")
+	}
+	require.ErrorIs(t, err, ErrCallbackConfigurationChanged, "superseded same-revision discovery must not publish")
+	current, err := p.currentLoginSnapshot(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, newer.CallbackFingerprint, current.CallbackFingerprint)
+	require.Equal(t, issuer+"/auth/newer", current.oauth.Endpoint.AuthURL)
+	require.Equal(t, issuer+"/token/newer", current.oauth.Endpoint.TokenURL)
+	require.Same(t, newer.provider, current.provider)
+	require.Same(t, newer.verifier, current.verifier)
+	require.NoError(t, p.assertLoginSnapshot(context.Background(), newer))
+	require.Equal(t, int32(2), requests.Load())
 }

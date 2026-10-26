@@ -43,8 +43,11 @@ type Plugin struct {
 	// configuration is the active plugin configuration.
 	configuration         *Configuration
 	configurationRevision uint64
-	loginSnapshot         *LoginSnapshot
-	readApprovalFile      func() ([]byte, error)
+	// discoveryAttempt orders every discovery entry point, including overlapping
+	// lifecycle and login-retry calls with the same configuration revision.
+	discoveryAttempt uint64
+	loginSnapshot    *LoginSnapshot
+	readApprovalFile func() ([]byte, error)
 
 	// encryptionKey is the HMAC key used to sign OAuth state tokens.
 	// Loaded from the KV store on activation; never exposed via config or UI.
@@ -175,11 +178,13 @@ func (p *Plugin) clearOIDCProvider() {
 
 // initOIDCProvider discovers and initializes the OIDC provider, OAuth2 config, and verifier.
 func (p *Plugin) initOIDCProvider() error {
-	p.configurationLock.RLock()
+	p.configurationLock.Lock()
 	config := p.configuration.Clone()
 	revision := p.configurationRevision
 	key := p.encryptionKey
-	p.configurationLock.RUnlock()
+	p.discoveryAttempt++
+	attempt := p.discoveryAttempt
+	p.configurationLock.Unlock()
 	if key == "" {
 		return nil
 	} // OnConfigurationChange may precede activation.
@@ -226,8 +231,9 @@ func (p *Plugin) initOIDCProvider() error {
 	})
 
 	p.configurationLock.Lock()
-	// A configuration saved during discovery gets its own OnConfigurationChange, so this result is stale.
-	stale := p.configuration == nil || p.configurationRevision != revision || p.encryptionKey != key || *p.configuration != *config
+	// A newer discovery attempt fences this result even at the same configuration
+	// revision. Slow lifecycle discovery must not overwrite a newer login retry.
+	stale := p.discoveryAttempt != attempt || p.configuration == nil || p.configurationRevision != revision || p.encryptionKey != key || *p.configuration != *config
 	if !stale {
 		p.oidcProvider = provider
 		p.oauth2Config = oauthConfig
@@ -236,7 +242,7 @@ func (p *Plugin) initOIDCProvider() error {
 	}
 	p.configurationLock.Unlock()
 	if stale {
-		return fmt.Errorf("configuration changed during discovery")
+		return ErrCallbackConfigurationChanged
 	}
 
 	p.API.LogInfo("OIDC provider initialized successfully",
