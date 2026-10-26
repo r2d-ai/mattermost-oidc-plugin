@@ -86,3 +86,8 @@ The new exact archive SHA256 superseding the earlier code-stage archive is
 `f91bc0c8a10d2f6b59604a6fbefc37f7d1db8227966589c3947fe426a937241e`.
 The one moderate npm baseline remains deferred. Installed enablement is still
 held pending scoped re-review; no deployed evidence is claimed.
+
+The subsequently authorized installed checks are recorded separately in
+[plane-broker-live.md](plane-broker-live.md) and its status-only JSON artifact.
+They use a clean-HEAD archive tied to the approved code commit; this does not
+change or retroactively relabel the earlier code-stage build results.
