@@ -1,7 +1,7 @@
 # Encrypted delegated credentials
 
-This stage captures OIDC credentials and serializes refresh/disconnect for later
-server-side delegated access. It does not add the broker/exchange endpoint or
+The plugin captures encrypted OIDC credentials, serializes refresh/disconnect,
+and provides a fixed authenticated Plane token exchange broker. It does not
 alter ordinary login scopes. In particular, do not request offline access merely to serve
 `/plane tasks`. Production requires its own provider capability proof.
 
@@ -122,7 +122,7 @@ withholds the token and logs a generic failure; operators must investigate the
 unreleased session. Token consumers must reassert authority at use/release.
 
 The lifecycle below owns rotating-refresh exclusion, crash/response ambiguity
-and token revocation. The later broker owns caller authentication, durable
+and token revocation. The broker owns caller authentication, durable
 replay checks, exact audience/scope exchange and release of only a short-lived
 `plane-api` token. PluginHTTP alone is not caller authentication. This stage's
 internal store methods are not public authorization interfaces.
@@ -205,7 +205,7 @@ qualify; bot, PAT and OAuth integration sessions do not. Form-only CSRF,
 `X-Requested-With`, browser user cookies and user headers without a core session
 cannot substitute. This proves session possession, not physical human action
 or recent reauthentication. Other public login/config routes retain their
-existing boundary; the later server broker will use its own HMAC guard.
+existing boundary; the server broker uses its own HMAC guard.
 
 Local invalidation completes before best-effort remote refresh-token revocation.
 Provider failure/timeout cannot restore local credentials or make a successful
@@ -238,3 +238,159 @@ OIDC login may reconnect by publishing a strictly later generation; no tombstone
 counter may be reset. Tests use synthetic in-process TLS and shared fake durable
 KV. This stage does not establish installed-runtime capture, backup handling or
 B3/G2 deployment acceptance; the historical local fixture remains frozen.
+
+
+## Authenticated fixed Plane broker
+
+`POST /plugins/mattermost-oidc/internal/plane-token` accepts exactly one JSON
+object with `mm_user_id`, `audience`, `scope`, and `request_id`. Audience is
+`plane-api`; scope is exactly `plane.read` or `plane.read plane.write`.
+Request IDs contain 1–128 printable ASCII characters. Unknown/duplicate fields,
+trailing JSON and bodies over 4 KiB are rejected. Subject tokens, issuer,
+requested subject, endpoints, client and secrets are never caller inputs.
+
+Success contains exactly `access_token` and integer Unix-seconds `expires_at`.
+Every response has `Cache-Control: no-store` and `Pragma: no-cache`. Errors
+contain exactly `error` and `request_id`; absent/unsafe request IDs are empty:
+
+| HTTP | Error | Meaning |
+| --- | --- | --- |
+| 400 | invalid_input | Method, target or JSON does not meet the fixed contract |
+| 401 | invalid_signature | Missing/bad signature, retired/unknown key, stale timestamp or replay |
+| 403 | forbidden | Invalid binding, inactive user, audience or scope |
+| 409 | reconnect_required | Credentials need a fresh verified OIDC login |
+| 503 | unavailable | Integration disabled, provider/store/key configuration unavailable or capacity/rate limit |
+
+A 503 is retryable with a fresh nonce and bounded backoff. It must never trigger
+an administrator-credential fallback. Failed exchanges retain their nonce.
+
+### Caller authentication and transport
+
+Supply independent external `MM_PLANE_BROKER_HMAC_KEYS` and
+`MM_PLANE_BROKER_HMAC_ACTIVE_KEY_ID` process variables. Encoding, key IDs,
+maximum ring size and strict parsing match the encryption ring above: JSON
+object, canonical padded standard base64, exactly 32 random bytes per key,
+1–64 character IDs and at most 16 entries / 16 KiB. The active ID must exist.
+The caller signs with the active key; overlap keys verify only. The broker
+accepts these dedicated headers once each:
+
+* `X-Plane-Key-Id`: selected verification key ID.
+* `X-Plane-Timestamp`: canonical decimal UTC Unix seconds, ±30 seconds inclusive.
+* `X-Plane-Nonce`: 32 independently random bytes, unpadded canonical base64url.
+* `X-Plane-Signature`: lowercase hex HMAC-SHA256.
+
+Canonical UTF-8 signing bytes are `POST`, newline, the literal external path
+`/plugins/mattermost-oidc/internal/plane-token`, newline, lowercase hexadecimal
+SHA256 of the exact raw body, newline, timestamp, newline, nonce. There is no
+trailing newline. Do not reserialize the body after signing.
+
+Only a root-origin SiteURL is supported. Public HTTP requires the original
+`RequestURI` to equal that external literal and the core-stripped local path to
+be `/internal/plane-token`. This rejects a bare `?`, escaped alternative paths,
+and original `access_token` queries even after core strips the parsed query.
+Inter-plugin clients must call `API.PluginHTTP` with exactly
+`/mattermost-oidc/internal/plane-token`, empty `RequestURI`, and no URL escaping,
+query or fragment. At the target, core must attribute the source ID
+`mattermost-plugin-plane`; observed local path/raw path/query/fragment are
+checked. Core reparses decoded PluginHTTP paths, so these target-side checks
+cannot prove original pre-normalization spelling. The bot must construct the
+plain fixed input. HMAC always signs the external literal on both transports.
+Subpath SiteURLs and arbitrary proxy rewrites are outside this contract.
+
+HMAC authorizes the trusted integration to select **any eligible linked user**.
+A user UUID, forged header or PluginHTTP call alone cannot authorize issuance.
+The signature does not independently prove a human event, consent or session.
+All normally launched server plugins inherit the server process environment;
+trusted installed plugins, administrators and deployment/install authority are
+inside this trust boundary. Environment injection separates secrets from
+browser settings/config/KV, not from other trusted server plugins. Separate
+key names do not provide process isolation. Changing Docker environment settings
+does not update already-running plugin processes; apply them through a reviewed
+process replacement and prove propagation without printing their values.
+
+### Replay, capacity and time bounds
+
+Replay protection is shared durable KV CAS, independent of node and signing-key
+ID. The SHA256 nonce digest selects one of 4,096 fixed slots. An acknowledged
+claim uses a 131-second slot lifetime, reserving the call budget and rounding
+so a successful durable acknowledgement has at least 120 seconds remaining.
+An acknowledgement with less remaining retention denies issuance. An exact
+replay returns 401. A different live digest in the same slot returns 503 even
+if another slot is empty. This conservative collision policy sacrifices
+availability to preserve a hard cluster-wide capacity bound. Never evict a
+live slot. Use fresh nonces on retry. Four fixed slots are lazily scanned per
+accepted request; cleanup compares exact expired bytes so it cannot erase a
+replacement. KV failure or ambiguous CAS acknowledgement fails closed.
+
+Each node permits 8 concurrent broker calls, 120 authenticated
+calls per UTC minute across the integration, and 10 per user per UTC minute.
+These fixed-window rate limits are per process/node and reset on restart; the
+replay slots are durable and cluster-wide. Integration quota is charged immediately after valid HMAC, before replay KV,
+including invalid JSON/scope requests. Per-user state is created only after
+signature, JSON and scope validation and is bounded by the integration limit.
+Exhausted limits return 503. Unauthenticated input cannot allocate user entries.
+
+The whole call has a 10-second context budget. Every discovery, refresh,
+exchange and JWKS HTTP operation has a 5-second timeout within that budget;
+redirects are refused and decoded responses are capped at 64 KiB. Tokens are
+capped at 16 KiB. Caller cancellation is propagated. Existing SDK KV/user calls
+have no context-aware cancellation, so an unresponsive core RPC is not a hard
+wall-clock guarantee; after it returns, deadline checks deny release. The HTTP
+core owns ingress/body delivery and its limits before plugin invocation.
+
+### Fixed exchange and verified output
+
+The broker exchanges as the configured confidential client `mattermost-oidc`
+using `client_secret_post`, V2 token-exchange grant, access-token subject and
+requested types, `plane-api` audience and the exact requested scope. Discovery
+must return the exact approved HTTPS issuer; token and JWKS endpoints must use
+HTTPS on that same origin without query components. No login scope is added;
+an ordinary subject token need not itself contain Plane scopes.
+
+Output verification uses only issuer-discovered JWKS and RS256 signatures;
+token-directed key URLs are never fetched. Signed claims must contain exact
+issuer and current stored subject, audience consisting only of `plane-api`,
+`azp=mattermost-oidc`, payload `typ=Bearer`, and exactly the requested scope set.
+Integer `iat`/`exp` are mandatory; lifetime must be 120–300 seconds, iat/optional
+nbf allow at most 30 seconds of future skew, and more than 30 seconds of actual
+validity must remain at release. Expires metadata must agree within 30 seconds
+with verified expiry and reception time. No act/delegation-chain claim is
+invented. Refresh/ID tokens in a provider response are never returned.
+
+After all network work, the broker repeats current user/native/B0 authority and
+credential generation checks. Its captured monotonic configuration revision
+must still match, including a disable/re-enable or change/revert during the
+call. Current HMAC and encryption key availability is required. These final
+checks narrow the last-check/release race; they do not make a configuration
+change atomic with bytes already released or revoke a delivered access token.
+
+### Rotation, emergency disable and audit
+
+For HMAC rotation, distribute old + new verification keys to every server and
+caller process first, select the new active signing ID, switch callers, then
+retire the old ID after the overlap window and bounded in-flight calls drain.
+The old key cannot authenticate after retirement. Aliases containing identical
+key bytes share the same nonce namespace. Never substitute the OAuth-state KV
+key, generate a fallback key, or print rings in diagnostics. Encryption-key
+rotation and key-loss/reconnect handling remain as described above.
+
+To stop issuance, set `EnablePlaneBroker=false` (or disable persistence). The
+broker checks switches on every call and revision/generation again before
+release. Ordinary OIDC login keeps its independent `Enable` switch and works
+with broker disabled. Disabling login alone does not disable delegated use.
+Already-issued access tokens remain usable until expiry or Plane-side denial;
+use explicit disconnect/revoke to fence future delegated use durably.
+
+Audit records contain actor UUID, validated bounded request ID, issuer
+fingerprint, allowed operation/scopes, outcome and latency only. They do not
+contain task text, tokens, secrets or provider error bodies. Alert on unexpected
+cross-user issuance, rapid user switching, write-scope requests outside approved
+bot operations, signature/replay failures and sustained 503 capacity/provider
+failures. Treat HMAC key compromise as potential issuance for all linked users:
+disable integration, retire keys, investigate audit and fence affected records.
+
+Unit tests and packaging validation do not prove installed environment
+inheritance, callback capture, encrypted database backups or deployed PluginHTTP
+behavior. Those synthetic-runtime gates and independent task review remain
+required before rollout. P2 and production remain disabled pending their shared
+gate; no unsigned exchange fallback is permitted.

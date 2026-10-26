@@ -8,7 +8,9 @@ import (
 
 // Configuration holds the plugin's settings from the System Console.
 type Configuration struct {
-	Enable                 bool   `json:"Enable"`
+	Enable bool `json:"Enable"`
+	// Delegated switches are live policy, independent of interactive Enable.
+	// Secrets are exclusively external process key rings, never settings.
 	EnablePlaneBroker      bool   `json:"EnablePlaneBroker"`
 	EnableTokenPersistence bool   `json:"EnableTokenPersistence"`
 	IssuerURL              string `json:"IssuerURL"`

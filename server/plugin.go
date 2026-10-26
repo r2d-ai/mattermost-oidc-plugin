@@ -77,6 +77,7 @@ type Plugin struct {
 
 	// router handles HTTP requests for this plugin.
 	router *mux.Router
+	broker brokerLimits
 }
 
 // OnActivate is called when the plugin is activated.
@@ -293,6 +294,10 @@ func (p *Plugin) retryOIDCProvider() {
 
 // ServeHTTP routes incoming HTTP requests to the plugin's router.
 func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/internal/") {
+		p.handlePlaneBroker(w, r)
+		return
+	}
 	if r.URL.Path == "/api/v1/plane/disconnect" || r.URL.Path == "/api/v1/plane/revoke" {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)

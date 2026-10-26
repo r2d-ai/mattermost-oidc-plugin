@@ -249,6 +249,9 @@ func (l *TokenLifecycle) transport(ctx context.Context, b IdentityBinding) (*del
 		client = *p.discoveryClient
 	}
 	client.Timeout = refreshBudget
+	if limit, ok := ctx.Value(brokerHTTPBudgetKey{}).(time.Duration); ok && limit > 0 && limit < client.Timeout {
+		client.Timeout = limit
+	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(b.Issuer, "/")+"/.well-known/openid-configuration", nil)
 	if e != nil {

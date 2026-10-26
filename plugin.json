@@ -39,7 +39,7 @@
                 "key": "EnablePlaneBroker",
                 "display_name": "Enable Plane Delegated Access",
                 "type": "bool",
-                "help_text": "Permit delegated credential use when encrypted persistence is also enabled. Disabled by default. Credential capture alone does not provide a broker endpoint.",
+                "help_text": "Enable the HMAC-authenticated fixed Plane token broker when encrypted persistence is also enabled. Requires external HMAC and credential key rings, an approved identity gate, and the mattermost-oidc client. Disabling stops issuance independently of ordinary login. See docs/plane-broker-operations.md.",
                 "default": false
             },
             {

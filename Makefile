@@ -18,7 +18,8 @@ all: bundle
 ## Build the Go server plugin binaries for all platforms
 server:
 	@echo "Building server plugin..."
-	@cd server && \
+	@set -e; \
+	cd server; \
 	for platform in $(SERVER_PLATFORMS); do \
 		os=$$(echo $$platform | cut -d'/' -f1); \
 		arch=$$(echo $$platform | cut -d'/' -f2); \
@@ -46,7 +47,8 @@ bundle: server webapp
 	@cp webapp/dist/main.js dist/$(PLUGIN_ID)/webapp/dist/
 	@mkdir -p dist/$(PLUGIN_ID)/assets
 	@if [ -d assets ]; then cp -r assets/* dist/$(PLUGIN_ID)/assets/ 2>/dev/null || true; fi
-	@cd dist && tar -czf $(BUNDLE_NAME) $(PLUGIN_ID)
+	@tar -czf dist/$(BUNDLE_NAME) -C dist/$(PLUGIN_ID) plugin.json server webapp assets
+	@python3 scripts/test_bundle.py dist/$(BUNDLE_NAME)
 	@echo "Plugin bundle created: dist/$(BUNDLE_NAME)"
 
 ## Deploy to a running Mattermost / Mostlymatter instance (requires MM_SERVICESETTINGS_SITEURL and MM_ADMIN_TOKEN)

@@ -69,7 +69,11 @@ func validCredentialBinding(b IdentityBinding) bool {
 // Read external secrets on use so loss/rotation takes effect without a KV key
 // fallback. Errors deliberately contain neither the supplied JSON nor key IDs.
 func credentialKeyring() (string, map[string][]byte, error) {
-	raw, active := os.Getenv("MM_OIDC_CREDENTIAL_KEYS"), os.Getenv("MM_OIDC_CREDENTIAL_ACTIVE_KEY_ID")
+	return externalKeyring(os.Getenv("MM_OIDC_CREDENTIAL_KEYS"), os.Getenv("MM_OIDC_CREDENTIAL_ACTIVE_KEY_ID"))
+}
+
+// externalKeyring parses an external 256-bit key ring without reading process state.
+func externalKeyring(raw, active string) (string, map[string][]byte, error) {
 	if len(raw) == 0 || len(raw) > 16384 || !credentialKeyID.MatchString(active) {
 		return "", nil, ErrCredentialsUnavailable
 	}
