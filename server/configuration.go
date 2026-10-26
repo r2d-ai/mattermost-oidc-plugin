@@ -8,23 +8,25 @@ import (
 
 // Configuration holds the plugin's settings from the System Console.
 type Configuration struct {
-	Enable               bool   `json:"Enable"`
-	IssuerURL            string `json:"IssuerURL"`
-	ClientID             string `json:"ClientID"`
-	ClientSecret         string `json:"ClientSecret"`
-	Scopes               string `json:"Scopes"`
-	ButtonText           string `json:"ButtonText"`
-	ButtonColor          string `json:"ButtonColor"`
-	UsernameClaim        string `json:"UsernameClaim"`
-	EmailClaim           string `json:"EmailClaim"`
-	FirstNameClaim       string `json:"FirstNameClaim"`
-	LastNameClaim        string `json:"LastNameClaim"`
-	PositionClaim        string `json:"PositionClaim"`
-	EmailVerifiedClaim   string `json:"EmailVerifiedClaim"`
-	RequireEmailVerified bool   `json:"RequireEmailVerified"`
-	AutoCreateAccounts   bool   `json:"AutoCreateAccounts"`
-	AutoLinkByEmail      bool   `json:"AutoLinkByEmail"` // Deprecated: decoded for compatibility; never grants ownership.
-	DefaultTeam          string `json:"DefaultTeam"`
+	Enable                 bool   `json:"Enable"`
+	EnablePlaneBroker      bool   `json:"EnablePlaneBroker"`
+	EnableTokenPersistence bool   `json:"EnableTokenPersistence"`
+	IssuerURL              string `json:"IssuerURL"`
+	ClientID               string `json:"ClientID"`
+	ClientSecret           string `json:"ClientSecret"`
+	Scopes                 string `json:"Scopes"`
+	ButtonText             string `json:"ButtonText"`
+	ButtonColor            string `json:"ButtonColor"`
+	UsernameClaim          string `json:"UsernameClaim"`
+	EmailClaim             string `json:"EmailClaim"`
+	FirstNameClaim         string `json:"FirstNameClaim"`
+	LastNameClaim          string `json:"LastNameClaim"`
+	PositionClaim          string `json:"PositionClaim"`
+	EmailVerifiedClaim     string `json:"EmailVerifiedClaim"`
+	RequireEmailVerified   bool   `json:"RequireEmailVerified"`
+	AutoCreateAccounts     bool   `json:"AutoCreateAccounts"`
+	AutoLinkByEmail        bool   `json:"AutoLinkByEmail"` // Deprecated: decoded for compatibility; never grants ownership.
+	DefaultTeam            string `json:"DefaultTeam"`
 }
 
 // IsValid checks that all required configuration fields are present.

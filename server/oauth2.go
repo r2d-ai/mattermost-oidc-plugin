@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -291,6 +292,7 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := oauthConfig.Exchange(ctx, code, exchangeOpts...)
+	tokenReceivedAt := time.Now()
 	if err != nil {
 		p.API.LogError("OIDC code exchange failed")
 		p.renderError(w, "Failed to complete authentication. Please try again.")
@@ -404,6 +406,22 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only a verified callback with a successful native session can capture.
+	// Missing keys/optional storage failures after a durable fence preserve login.
+	// Authority or initial-fence failures revoke only this callback's new session.
+	if session.UserId != binding.Binding.MattermostUserID || mmUser.Id != binding.Binding.MattermostUserID {
+		err = ErrIdentityConflict
+	} else {
+		err = p.captureLoginCredentials(ctx, snapshot, binding, token, tokenReceivedAt)
+	}
+	if err != nil {
+		if revokeErr := p.API.RevokeSession(session.Id); revokeErr != nil {
+			p.API.LogError("Failed to revoke unreleased OIDC session")
+		}
+		p.renderError(w, "Identity unavailable. Please try again.")
+		return
+	}
+
 	// Mobile login: hand the session token back to the native app through its custom
 	// URL scheme, mirroring core's /oauth/<service>/mobile_login (token + CSRF appended
 	// to the deep link, delivered via an HTML auto-redirect page rather than a 302 —
@@ -432,6 +450,67 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, siteURL+returnTo, http.StatusFound)
+}
+
+func (p *Plugin) captureLoginCredentials(ctx context.Context, snapshot *LoginSnapshot, binding ResolvedIdentity, token *oauth2.Token, receivedAt time.Time) error {
+	if err := p.assertLoginSnapshot(ctx, snapshot); err != nil {
+		return err
+	}
+	if err := p.AssertCurrentBinding(ctx, binding); err != nil {
+		return err
+	}
+	store := newCredentialStore(p)
+	var publication *credentialPublication
+	if p.getConfiguration().EnableTokenPersistence {
+		credentials := StoredCredentials{
+			Binding: binding.Binding, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken,
+			AccessExpiresAt: token.Expiry, RefreshExpiresAt: refreshExpiry(token, receivedAt),
+			GateEpoch: binding.GateEpoch, BindingRevision: binding.BindingRevision,
+		}
+		var err error
+		publication, err = store.save(ctx, credentials)
+		if err != nil {
+			if !errors.Is(err, ErrCredentialsUnavailable) {
+				return err
+			}
+			p.API.LogWarn("OIDC login completed without delegated credentials")
+		}
+	}
+	err := p.assertLoginSnapshot(ctx, snapshot)
+	if err == nil {
+		err = p.AssertCurrentBinding(ctx, binding)
+	}
+	if err != nil && publication != nil {
+		if cleanupErr := store.abandonPublication(ctx, binding.Binding, publication.envelope, publication.ready); cleanupErr != nil {
+			return cleanupErr
+		}
+	}
+	return err
+}
+
+// refresh_expires_in is provider-specific, not an OIDC guarantee. Missing, zero,
+// invalid or unbounded values remain unknown, never an invented infinite expiry.
+func refreshExpiry(token *oauth2.Token, now time.Time) time.Time {
+	var seconds int64
+	switch v := token.Extra("refresh_expires_in").(type) {
+	case float64:
+		if v <= 0 || v > 315360000 || v != float64(int64(v)) {
+			return time.Time{}
+		}
+		seconds = int64(v)
+	case json.Number:
+		seconds, _ = v.Int64()
+	case string:
+		seconds, _ = strconv.ParseInt(v, 10, 64)
+	case int64:
+		seconds = v
+	case int:
+		seconds = int64(v)
+	}
+	if seconds <= 0 || seconds > 315360000 {
+		return time.Time{}
+	}
+	return now.Add(time.Duration(seconds) * time.Second)
 }
 
 // renderPopupAuthComplete renders the HTML page shown in the popup window after a

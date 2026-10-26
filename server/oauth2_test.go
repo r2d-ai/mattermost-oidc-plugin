@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
@@ -1039,13 +1041,23 @@ func TestOnActivateAndConfigChangeDoNotRedundantlyInitProvider(t *testing.T) {
 // Runs the complete callback against a signed TLS OIDC provider. Tokens remain in
 // test memory; mutation counters prove failures happen before account/session effects.
 func TestOAuth2CompleteCallback(t *testing.T) {
-	for _, mode := range []string{"web", "popup", "mobile", "secret_fresh", "secret_before", "secret_during", "wrong_userinfo", "wrong_nonce", "missing_cookie", "epoch_before"} {
+	runCredentialCallbacks(t, []string{"web", "popup", "mobile", "secret_fresh", "secret_before", "secret_during", "wrong_userinfo", "wrong_nonce", "missing_cookie", "epoch_before", "session_failure", "wrong_session_user", "native_changed", "authority_after_session", "authority_after_capture", "snapshot_after_capture", "legacy", "invalid_signature"})
+}
+
+func TestLoginSucceedsWhenPersistenceFails(t *testing.T) {
+	runCredentialCallbacks(t, []string{"missing_key", "publication_failure", "fence_failure", "persistence_disabled", "flag_during"})
+}
+
+func runCredentialCallbacks(t *testing.T, modes []string) {
+	t.Helper()
+	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
+			credentialKeys(t, "current", map[string]string{"current": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))})
 			key, e := rsa.GenerateKey(rand.Reader, 2048)
 			require.NoError(t, e)
 			signer, e := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, nil)
 			require.NoError(t, e)
-			var issuer, nonce, challenge string
+			var issuer, nonce, challenge, issuedIDToken string
 			exchanges := 0
 			var p *Plugin
 			idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1066,6 +1078,11 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 					_ = r.ParseForm()
 					sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
 					require.Equal(t, challenge, base64.RawURLEncoding.EncodeToString(sum[:]))
+					if mode == "flag_during" {
+						cfg := p.getConfiguration()
+						cfg.EnableTokenPersistence = false
+						p.setConfiguration(cfg)
+					}
 					if mode == "secret_during" {
 						cfg := p.getConfiguration()
 						cfg.ClientSecret = "rotated"
@@ -1078,9 +1095,18 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 					claims, _ := json.Marshal(map[string]any{"iss": issuer, "sub": "s", "aud": "client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": signedNonce, "email": "callback@example.com", "preferred_username": "callback", "email_verified": true})
 					obj, e := signer.Sign(claims)
 					require.NoError(t, e)
+					if mode == "invalid_signature" {
+						other, err := rsa.GenerateKey(rand.Reader, 2048)
+						require.NoError(t, err)
+						otherSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: other}, nil)
+						require.NoError(t, err)
+						obj, e = otherSigner.Sign(claims)
+						require.NoError(t, e)
+					}
 					jwt, e := obj.CompactSerialize()
 					require.NoError(t, e)
-					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "test-access", "token_type": "Bearer", "id_token": jwt})
+					issuedIDToken = jwt
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "test-access", "refresh_token": "test-refresh", "expires_in": 300, "refresh_expires_in": 600, "token_type": "Bearer", "id_token": jwt})
 				default:
 					http.NotFound(w, r)
 				}
@@ -1088,10 +1114,48 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 			defer idp.Close()
 			issuer = idp.URL
 			a := newIdentityAPI()
+			callbackAPI := &credentialCallbackAPI{identityAPI: a, mode: mode}
 			p = &Plugin{encryptionKey: "shared-key", discoveryClient: idp.Client()}
-			p.SetAPI(a)
-			p.setConfiguration(&Configuration{Enable: true, IssuerURL: issuer, ClientID: "client", ClientSecret: "secret", AutoCreateAccounts: true, EmailClaim: "email", UsernameClaim: "preferred_username", EmailVerifiedClaim: "email_verified", RequireEmailVerified: true})
+			callbackAPI.plugin = p
+			p.SetAPI(callbackAPI)
+			p.setConfiguration(&Configuration{Enable: true, EnableTokenPersistence: true, EnablePlaneBroker: true, IssuerURL: issuer, ClientID: "client", ClientSecret: "secret", AutoCreateAccounts: true, EmailClaim: "email", UsernameClaim: "preferred_username", EmailVerifiedClaim: "email_verified", RequireEmailVerified: true})
 			a.kv[identityGateKey], _ = json.Marshal(identityGate{Version: 1, Status: "active", Epoch: 2, Issuer: issuer, ClientID: "client", IdentityFingerprint: identityFingerprint(issuer, "client")})
+			if mode == "persistence_disabled" {
+				cfg := p.getConfiguration()
+				cfg.EnableTokenPersistence = false
+				p.setConfiguration(cfg)
+				a.failKey = credentialPrefix
+			}
+			if mode == "fence_failure" {
+				a.failKey = credentialPrefix
+			}
+			if mode == "missing_key" {
+				t.Setenv("MM_OIDC_CREDENTIAL_KEYS", "{}")
+			}
+			if mode == "legacy" {
+				a.kv[KVOIDCUserPrefix+"s"] = []byte(model.NewId())
+			}
+			if mode == "authority_after_capture" || mode == "snapshot_after_capture" || mode == "publication_failure" {
+				a.beforeCAS = func(k string, old, next []byte) *model.AppError {
+					if strings.HasPrefix(k, credentialPrefix) && bytes.Contains(next, []byte(`"state":"ready"`)) {
+						if mode == "publication_failure" {
+							return failAPI()
+						}
+						if mode == "snapshot_after_capture" {
+							cfg := p.getConfiguration()
+							cfg.ClientSecret = "changed-after-capture"
+							p.setConfiguration(cfg)
+							return nil
+						}
+						a.mu.Lock()
+						for _, u := range a.users {
+							u.DeleteAt = 1
+						}
+						a.mu.Unlock()
+					}
+					return nil
+				}
+			}
 			require.NoError(t, p.initOIDCProvider())
 			if mode == "secret_fresh" {
 				cfg := p.getConfiguration()
@@ -1134,7 +1198,58 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 			}
 			finish := httptest.NewRecorder()
 			p.handleOAuth2Callback(finish, req)
-			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh"
+			public := httptest.NewRecorder()
+			p.handleGetPublicConfig(public, httptest.NewRequest("GET", "/api/v1/config", nil))
+			keyValue := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+			for _, secret := range []string{"test-access", "test-refresh", keyValue} {
+				require.NotContains(t, public.Body.String(), secret)
+				require.NotContains(t, finish.Header().Get("Set-Cookie"), secret)
+				require.NotContains(t, callbackAPI.logs.String(), secret)
+				for _, v := range a.kv {
+					require.NotContains(t, string(v), secret)
+				}
+			}
+			if issuedIDToken != "" {
+				for _, v := range a.kv {
+					require.NotContains(t, string(v), issuedIDToken)
+				}
+			}
+			require.NotContains(t, public.Body.String(), "EnableTokenPersistence")
+			require.NotContains(t, public.Body.String(), "MM_OIDC_CREDENTIAL")
+			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during"
+			for _, v := range a.kv {
+				require.NotContains(t, string(v), "test-access")
+				require.NotContains(t, string(v), "test-refresh")
+			}
+			require.NotContains(t, finish.Body.String(), "test-access")
+			require.NotContains(t, finish.Body.String(), "test-refresh")
+			for _, v := range callbackAPI.sessionProps {
+				require.NotContains(t, v, "test-access")
+				require.NotContains(t, v, "test-refresh")
+			}
+			if mode == "fence_failure" || mode == "authority_after_session" || mode == "authority_after_capture" || mode == "snapshot_after_capture" || mode == "native_changed" || mode == "wrong_session_user" {
+				require.Equal(t, []string{callbackAPI.sessionID}, callbackAPI.revokedIDs)
+				require.NotContains(t, finish.Body.String(), callbackAPI.sessionToken)
+				for _, cookie := range finish.Result().Cookies() {
+					require.NotEqual(t, "MMAUTHTOKEN", cookie.Name)
+				}
+			}
+			if mode == "persistence_disabled" || mode == "flag_during" {
+				require.Zero(t, callbackAPI.credentialReads)
+				for k := range a.kv {
+					require.False(t, strings.HasPrefix(k, credentialPrefix))
+				}
+			}
+			if mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" {
+				for _, u := range a.users {
+					c, err := newCredentialStore(p).Load(context.Background(), IdentityBinding{Issuer: issuer, Subject: "s", MattermostUserID: u.Id})
+					require.NoError(t, err)
+					require.Equal(t, "test-access", c.AccessToken)
+					require.Equal(t, "test-refresh", c.RefreshToken)
+					require.WithinDuration(t, time.Now().Add(600*time.Second), c.RefreshExpiresAt, 5*time.Second)
+					require.WithinDuration(t, time.Now().Add(300*time.Second), c.AccessExpiresAt, 5*time.Second)
+				}
+			}
 			if success {
 				require.Equal(t, 1, a.sessions)
 				require.Equal(t, 1, a.creates)
@@ -1142,7 +1257,7 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 					require.Equal(t, "oidc", u.AuthService)
 					require.Len(t, *u.AuthData, 67)
 				}
-				if mode == "web" || mode == "secret_fresh" {
+				if mode != "popup" && mode != "mobile" {
 					require.Equal(t, 302, finish.Code)
 				} else {
 					require.Equal(t, 200, finish.Code)
@@ -1151,11 +1266,95 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 					require.Contains(t, finish.Body.String(), "MMAUTHTOKEN")
 				}
 			} else {
-				require.Zero(t, a.sessions+a.creates+a.updates)
+				if mode == "fence_failure" || mode == "authority_after_session" || mode == "authority_after_capture" || mode == "snapshot_after_capture" || mode == "native_changed" || mode == "wrong_session_user" || mode == "session_failure" {
+					require.Equal(t, 1, a.creates)
+				} else {
+					require.Zero(t, a.sessions+a.creates+a.updates)
+				}
+				for k := range a.kv {
+					if strings.HasPrefix(k, credentialPrefix) {
+						var env credentialEnvelope
+						require.NoError(t, json.Unmarshal(a.kv[k], &env))
+						require.Equal(t, "invalidated", env.State, "failed callback must leave no usable captured generation")
+					}
+				}
 				if mode == "secret_before" || mode == "missing_cookie" || mode == "epoch_before" {
 					require.Zero(t, exchanges)
 				}
 			}
 		})
 	}
+}
+
+// Core session operations are the external boundary. The identity registry,
+// signed OIDC exchange and encrypted KV implementation remain real in these tests.
+type credentialCallbackAPI struct {
+	*identityAPI
+	plugin          *Plugin
+	mode            string
+	credentialReads int
+	revokedIDs      []string
+	sessionID       string
+	sessionToken    string
+	sessionProps    model.StringMap
+	logs            strings.Builder
+}
+
+func (a *credentialCallbackAPI) CreateSession(s *model.Session) (*model.Session, *model.AppError) {
+	if a.mode == "session_failure" {
+		return nil, failAPI()
+	}
+	out, err := a.identityAPI.CreateSession(s)
+	out.Id = model.NewId()
+	a.sessionToken, a.sessionProps = out.Token, out.Props
+	a.sessionID = out.Id
+	if a.mode == "wrong_session_user" {
+		out.UserId = model.NewId()
+	}
+	if a.mode == "authority_after_session" {
+		_, _ = a.plugin.freezeIdentityGate()
+	}
+	if a.mode == "native_changed" {
+		a.users[s.UserId].AuthData = model.NewPointer("other")
+	}
+	return out, err
+}
+func (a *credentialCallbackAPI) RevokeSession(id string) *model.AppError {
+	a.revokedIDs = append(a.revokedIDs, id)
+	return nil
+}
+
+func (a *credentialCallbackAPI) LogWarn(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+func (a *credentialCallbackAPI) LogError(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+func (a *credentialCallbackAPI) LogInfo(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+func (a *credentialCallbackAPI) LogDebug(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+
+func TestCredentialRefreshExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	for _, value := range []any{nil, 0, -1, "bad", "0", 0.1, float64(1e30), json.Number("1.2"), 315360001} {
+		token := (&oauth2.Token{}).WithExtra(map[string]any{"refresh_expires_in": value})
+		require.True(t, refreshExpiry(token, now).IsZero(), "invalid expiry must stay unknown")
+	}
+	for _, value := range []any{float64(600), json.Number("600"), "600", int64(600), int(600)} {
+		token := (&oauth2.Token{}).WithExtra(map[string]any{"refresh_expires_in": value})
+		require.Equal(t, time.Date(2026, 10, 26, 0, 10, 0, 0, time.UTC), refreshExpiry(token, now))
+	}
+}
+
+func (a *credentialCallbackAPI) KVGet(key string) ([]byte, *model.AppError) {
+	if strings.HasPrefix(key, credentialPrefix) {
+		a.credentialReads++
+		if a.mode == "persistence_disabled" {
+			return nil, failAPI()
+		}
+	}
+	return a.identityAPI.KVGet(key)
 }

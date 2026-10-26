@@ -120,12 +120,17 @@ func (p *Plugin) OnConfigurationChange() error {
 
 	p.configurationLock.RLock()
 	var (
-		unchanged   = p.configuration != nil && *p.configuration == configuration
-		hasProvider = p.oauth2Config != nil
+		unchanged        = p.configuration != nil && *p.configuration == configuration
+		onlyCaptureFlags = p.configuration != nil && sameLoginConfiguration(p.configuration, &configuration)
+		hasProvider      = p.oauth2Config != nil
 	)
 	p.configurationLock.RUnlock()
 	if unchanged && hasProvider {
 		return nil // if settings did not change and the provider is already running, skip re-discovery.
+	}
+	if onlyCaptureFlags && hasProvider {
+		p.setConfiguration(&configuration)
+		return nil
 	}
 
 	p.setConfiguration(&configuration)
@@ -161,8 +166,22 @@ func (p *Plugin) setConfiguration(configuration *Configuration) {
 	p.configurationLock.Lock()
 	defer p.configurationLock.Unlock()
 
+	// Capture switches are live policy, not part of the verified login snapshot.
+	// Preserve B0's full equality check for every other configuration field.
+	if p.configuration != nil && p.loginSnapshot != nil && sameLoginConfiguration(p.configuration, configuration) {
+		snapshot := *p.loginSnapshot
+		snapshot.configuration = *configuration.Clone()
+		p.loginSnapshot = &snapshot
+	}
 	p.configuration = configuration.Clone()
 	p.configurationRevision++
+}
+
+func sameLoginConfiguration(a, b *Configuration) bool {
+	left, right := *a, *b
+	left.EnableTokenPersistence, right.EnableTokenPersistence = false, false
+	left.EnablePlaneBroker, right.EnablePlaneBroker = false, false
+	return left == right
 }
 
 // clearOIDCProvider resets the cached provider, OAuth2 configuration, and verifier.
