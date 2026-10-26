@@ -92,6 +92,16 @@ func brokerError(err error) (int, string) {
 		return 503, "unavailable"
 	}
 }
+
+// A deployment-wide ring outage is retryable at the broker boundary. A valid
+// ring with a missing historical key or unusable generation remains B2 reconnect.
+func brokerCredentialAvailability() error {
+	if _, _, err := credentialKeyring(); err != nil {
+		return ErrTemporarilyUnavailable
+	}
+	return nil
+}
+
 func (p *Plugin) handlePlaneBroker(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
@@ -111,6 +121,11 @@ func (p *Plugin) handlePlaneBroker(w http.ResponseWriter, r *http.Request) {
 		p.API.LogInfo("Plane broker request", "actor_uuid", actor, "request_id", requestID, "issuer_fingerprint", issuerFP, "operation", operation, "outcome", outcome, "latency_ms", time.Since(started).Milliseconds())
 	}()
 	fail := func(err error) {
+		// A ring can disappear after preflight, including while B2 refresh fails.
+		// Keep the lifecycle's established error API unchanged.
+		if errors.Is(err, ErrReconnectRequired) && brokerCredentialAvailability() != nil {
+			err = ErrTemporarilyUnavailable
+		}
 		status, code := brokerError(err)
 		outcome = code
 		brokerFailure(w, status, code, requestID)
@@ -164,6 +179,10 @@ func (p *Plugin) handlePlaneBroker(w http.ResponseWriter, r *http.Request) {
 		fail(ErrIdentityMismatch)
 		return
 	}
+	if e = brokerCredentialAvailability(); e != nil {
+		fail(e)
+		return
+	}
 	resolved, e := p.ResolveBrokerBinding(ctx, input.UserID)
 	if e != nil {
 		fail(lifecycleError(e))
@@ -191,6 +210,11 @@ func (p *Plugin) handlePlaneBroker(w http.ResponseWriter, r *http.Request) {
 	p.configurationLock.RUnlock()
 	if !current || ctx.Err() != nil || expires <= time.Now().Unix()+30 {
 		fail(ErrTemporarilyUnavailable)
+		return
+	}
+	// Recheck deployment key availability at the successful release boundary.
+	if e = brokerCredentialAvailability(); e != nil {
+		fail(e)
 		return
 	}
 	// Retirement/loss of a verification key takes effect before release too.

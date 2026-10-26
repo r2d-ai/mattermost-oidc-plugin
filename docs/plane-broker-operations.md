@@ -261,6 +261,14 @@ contain exactly `error` and `request_id`; absent/unsafe request IDs are empty:
 | 409 | reconnect_required | Credentials need a fresh verified OIDC login |
 | 503 | unavailable | Integration disabled, provider/store/key configuration unavailable or capacity/rate limit |
 
+Missing/malformed external credential rings or an unusable active key
+configuration are integration availability failures (503), checked before
+lifecycle use, again at release, and when classifying a lifecycle reconnect
+error. A valid current ring with a missing historical decrypt key, tampered
+ciphertext, or missing/invalidated/ambiguous credential generation retains the
+existing reconnect requirement (409). A deployment ring outage must not direct
+users into repeated login attempts.
+
 A 503 is retryable with a fresh nonce and bounded backoff. It must never trigger
 an administrator-credential fallback. Failed exchanges retain their nonce.
 

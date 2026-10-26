@@ -66,3 +66,23 @@ exchange, actual PluginHTTP dispatch, replay after real process restart and
 broker-disable with complete fresh login remain pending. No Docker/runtime,
 production/shared-QA, identity map, remote repository, push or merge action was
 performed. P2 stays disabled pending its separate shared rollout gate.
+
+## Code-gate fix round 1: AES ring availability classification
+
+I1 was reproduced: absent/malformed external credential rings and unusable active
+configuration returned 409 before exchange, after exchange, and during refresh
+failure. Broker-owned availability checks now return 503 before lifecycle use
+and at release; reconnect errors are reclassified only while the external ring
+itself is unavailable. B1/B2 implementations and error APIs remain unchanged.
+A valid ring with missing/invalidated/ambiguous generations, a lost historical
+decrypt key or tampered ciphertext still returns 409.
+
+Focused RED recorded the 409-versus-503 mismatch. Focused GREEN passed in 2.241s;
+covering race tests passed in 5.809s, including existing store/ring/lifecycle key
+regressions and happy token/profile/no-secret cases. No full deadline-suite or
+npm rebuild was needed for this scoped broker change. `make bundle -o webapp`
+rebuilt all four server binaries and passed the actual archive regression.
+The new exact archive SHA256 superseding the earlier code-stage archive is
+`f91bc0c8a10d2f6b59604a6fbefc37f7d1db8227966589c3947fe426a937241e`.
+The one moderate npm baseline remains deferred. Installed enablement is still
+held pending scoped re-review; no deployed evidence is claimed.

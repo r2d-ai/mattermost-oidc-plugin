@@ -21,14 +21,15 @@ import (
 )
 
 type brokerFixtureState struct {
-	p      *Plugin
-	a      *identityAPI
-	users  []ResolvedIdentity
-	calls  atomic.Int32
-	claims func(map[string]any)
-	output func(map[string]any)
-	after  func()
-	status int
+	p       *Plugin
+	a       *identityAPI
+	users   []ResolvedIdentity
+	calls   atomic.Int32
+	claims  func(map[string]any)
+	output  func(map[string]any)
+	after   func()
+	status  int
+	refresh http.HandlerFunc
 }
 
 func brokerFixture(t *testing.T) *brokerFixtureState {
@@ -48,6 +49,10 @@ func brokerFixture(t *testing.T) *brokerFixtureState {
 		case "/token":
 			f.calls.Add(1)
 			require.NoError(t, r.ParseForm())
+			if r.Form.Get("grant_type") == "refresh_token" && f.refresh != nil {
+				f.refresh(w, r)
+				return
+			}
 			require.Equal(t, "urn:ietf:params:oauth:grant-type:token-exchange", r.Form.Get("grant_type"))
 			require.Equal(t, "mattermost-oidc", r.Form.Get("client_id"))
 			require.Equal(t, "plane-api", r.Form.Get("audience"))
@@ -311,7 +316,7 @@ func TestBrokerWholeCallHonorsEarlierDeadline(t *testing.T) {
 	require.Zero(t, f.calls.Load())
 }
 func TestBrokerNoKeyOrStoreFailureNeverExchanges(t *testing.T) {
-	for _, problem := range []string{"hmac", "aes", "kv", "signature"} {
+	for _, problem := range []string{"hmac", "aes", "aes-malformed", "aes-active-missing", "kv", "signature"} {
 		t.Run(problem, func(t *testing.T) {
 			f := brokerFixture(t)
 			r := signedBrokerRequest(f.body(0, "plane.read"), 0)
@@ -321,7 +326,10 @@ func TestBrokerNoKeyOrStoreFailureNeverExchanges(t *testing.T) {
 				t.Setenv("MM_PLANE_BROKER_HMAC_KEYS", "")
 			case "aes":
 				t.Setenv("MM_OIDC_CREDENTIAL_KEYS", "")
-				want = 409
+			case "aes-malformed":
+				t.Setenv("MM_OIDC_CREDENTIAL_KEYS", `{malformed`)
+			case "aes-active-missing":
+				t.Setenv("MM_OIDC_CREDENTIAL_ACTIVE_KEY_ID", "absent")
 			case "kv":
 				f.a.readFail = true
 			case "signature":
@@ -386,6 +394,95 @@ func TestBrokerRejectsMalformedProviderOutput(t *testing.T) {
 			}
 			w := serveBroker(f.p, signedBrokerRequest(f.body(0, "plane.read"), 0))
 			require.Equal(t, 503, w.Code)
+			require.NotContains(t, w.Body.String(), "access_token")
+		})
+	}
+}
+
+func TestBrokerCredentialRingLossAfterNetwork(t *testing.T) {
+	for _, mode := range []string{"missing", "malformed", "active-missing"} {
+		t.Run(mode, func(t *testing.T) {
+			f := brokerFixture(t)
+			f.after = func() {
+				switch mode {
+				case "missing":
+					t.Setenv("MM_OIDC_CREDENTIAL_KEYS", "")
+				case "malformed":
+					t.Setenv("MM_OIDC_CREDENTIAL_KEYS", `{malformed`)
+				case "active-missing":
+					t.Setenv("MM_OIDC_CREDENTIAL_ACTIVE_KEY_ID", "absent")
+				}
+			}
+			w := serveBroker(f.p, signedBrokerRequest(f.body(0, "plane.read"), 0))
+			require.Equal(t, 503, w.Code)
+			require.JSONEq(t, `{"error":"unavailable","request_id":"test-1"}`, w.Body.String())
+			require.Equal(t, int32(1), f.calls.Load())
+			require.NotContains(t, w.Body.String(), "access_token")
+		})
+	}
+}
+func TestBrokerCredentialRingLossDuringLifecycleError(t *testing.T) {
+	f := brokerFixture(t)
+	store := newCredentialStore(f.p)
+	c, e := store.Load(context.Background(), f.users[0].Binding)
+	require.NoError(t, e)
+	c.AccessExpiresAt = time.Now().Add(-time.Minute)
+	require.NoError(t, store.Save(context.Background(), c))
+	f.refresh = func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "refresh", r.Form.Get("refresh_token"))
+		t.Setenv("MM_OIDC_CREDENTIAL_KEYS", "")
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}
+	w := serveBroker(f.p, signedBrokerRequest(f.body(0, "plane.read"), 0))
+	require.Equal(t, 503, w.Code)
+	require.JSONEq(t, `{"error":"unavailable","request_id":"test-1"}`, w.Body.String())
+	require.Equal(t, int32(1), f.calls.Load())
+	require.NotContains(t, w.Body.String(), "access_token")
+}
+func TestBrokerCredentialGenerationFailuresRemainReconnect(t *testing.T) {
+	for _, mode := range []string{"missing", "invalidated", "ambiguous", "historical-key", "tampered"} {
+		t.Run(mode, func(t *testing.T) {
+			f := brokerFixture(t)
+			b := f.users[0].Binding
+			store := newCredentialStore(f.p)
+			switch mode {
+			case "missing":
+				f.a.mu.Lock()
+				delete(f.a.kv, credentialKey(b))
+				f.a.mu.Unlock()
+			case "invalidated":
+				require.NoError(t, store.Invalidate(context.Background(), b))
+			case "ambiguous":
+				c, e := store.Load(context.Background(), b)
+				require.NoError(t, e)
+				env, _, e := store.read(b)
+				require.NoError(t, e)
+				env.State = "refreshing"
+				env.Phase = "candidate"
+				env.Deadline = time.Now().Add(-time.Second).UnixNano()
+				env.StartedAt = env.Deadline - int64(time.Second)
+				_, raw, e := store.sealTransition(c, env)
+				require.NoError(t, e)
+				f.a.mu.Lock()
+				f.a.kv[credentialKey(b)] = raw
+				f.a.mu.Unlock()
+			case "historical-key":
+				credentialKeys(t, "new", map[string]string{"new": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))})
+			case "tampered":
+				env, _, e := store.read(b)
+				require.NoError(t, e)
+				env.Ciphertext[0] ^= 1
+				raw, e := json.Marshal(env)
+				require.NoError(t, e)
+				f.a.mu.Lock()
+				f.a.kv[credentialKey(b)] = raw
+				f.a.mu.Unlock()
+			}
+			w := serveBroker(f.p, signedBrokerRequest(f.body(0, "plane.read"), 0))
+			require.Equal(t, 409, w.Code)
+			require.JSONEq(t, `{"error":"reconnect_required","request_id":"test-1"}`, w.Body.String())
+			require.Zero(t, f.calls.Load())
 			require.NotContains(t, w.Body.String(), "access_token")
 		})
 	}
