@@ -74,4 +74,4 @@ Dependabot (`.github/dependabot.yml`) aktualisiert wöchentlich Go-Module, npm-P
 - `github.com/coreos/go-oidc/v3` — OIDC discovery and ID token verification
 - `golang.org/x/oauth2` — OAuth2 token exchange
 - `github.com/gorilla/mux` — HTTP routing
-- Go 1.26+, Node 22+, React >=16.8 (peer)
+- Go 1.27.3+, Node 22+, React >=16.8 (peer)

@@ -1,6 +1,6 @@
 module github.com/server-camp/mattermost-plugin-oidc
 
-go 1.26.10
+go 1.27.3
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
