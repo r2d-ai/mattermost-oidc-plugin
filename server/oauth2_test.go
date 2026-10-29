@@ -1045,7 +1045,7 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 }
 
 func TestLoginSucceedsWhenPersistenceFails(t *testing.T) {
-	runCredentialCallbacks(t, []string{"missing_key", "publication_failure", "fence_failure", "persistence_disabled", "flag_during", "missing_refresh"})
+	runCredentialCallbacks(t, []string{"missing_key", "publication_failure", "fence_failure", "persistence_disabled", "flag_during", "missing_refresh", "missing_username"})
 }
 
 func runCredentialCallbacks(t *testing.T, modes []string) {
@@ -1092,7 +1092,11 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 					if mode == "wrong_nonce" {
 						signedNonce = "other"
 					}
-					claims, _ := json.Marshal(map[string]any{"iss": issuer, "sub": "s", "aud": "client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": signedNonce, "email": "callback@example.com", "preferred_username": "callback", "email_verified": true})
+					claimValues := map[string]any{"iss": issuer, "sub": "s", "aud": "client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": signedNonce, "email": "callback@example.com", "preferred_username": "callback", "email_verified": true}
+					if mode == "missing_username" {
+						delete(claimValues, "preferred_username")
+					}
+					claims, _ := json.Marshal(claimValues)
 					obj, e := signer.Sign(claims)
 					require.NoError(t, e)
 					if mode == "invalid_signature" {
@@ -1118,7 +1122,12 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 			defer idp.Close()
 			issuer = idp.URL
 			a := newIdentityAPI()
-			callbackAPI := &credentialCallbackAPI{identityAPI: a, mode: mode}
+			if mode == "missing_username" {
+				existing := &model.User{Id: model.NewId(), Username: "callback", Email: "other@example.com"}
+				a.users[existing.Id] = existing
+			}
+			callbackAPI := &credentialCallbackAPI{identityAPI: a, mode: mode, existingSessionID: model.NewId()}
+			callbackAPI.activeSessions = map[string]bool{callbackAPI.existingSessionID: true}
 			p = &Plugin{encryptionKey: "shared-key", discoveryClient: idp.Client()}
 			callbackAPI.plugin = p
 			p.SetAPI(callbackAPI)
@@ -1220,7 +1229,7 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 			}
 			require.NotContains(t, public.Body.String(), "EnableTokenPersistence")
 			require.NotContains(t, public.Body.String(), "MM_OIDC_CREDENTIAL")
-			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during" || mode == "missing_refresh"
+			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during" || mode == "missing_refresh" || mode == "missing_username"
 			for _, v := range a.kv {
 				require.NotContains(t, string(v), "test-access")
 				require.NotContains(t, string(v), "test-refresh")
@@ -1233,6 +1242,8 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 			}
 			if mode == "fence_failure" || mode == "authority_after_session" || mode == "authority_after_capture" || mode == "snapshot_after_capture" || mode == "native_changed" || mode == "wrong_session_user" {
 				require.Equal(t, []string{callbackAPI.sessionID}, callbackAPI.revokedIDs)
+				require.True(t, callbackAPI.activeSessions[callbackAPI.existingSessionID])
+				require.False(t, callbackAPI.activeSessions[callbackAPI.sessionID])
 				require.NotContains(t, finish.Body.String(), callbackAPI.sessionToken)
 				for _, cookie := range finish.Result().Cookies() {
 					require.NotEqual(t, "MMAUTHTOKEN", cookie.Name)
@@ -1267,8 +1278,15 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 				require.Equal(t, 1, a.sessions)
 				require.Equal(t, 1, a.creates)
 				for _, u := range a.users {
+					if mode == "missing_username" && u.AuthService == "" {
+						require.Equal(t, "callback", u.Username)
+						continue
+					}
 					require.Equal(t, "oidc", u.AuthService)
 					require.Len(t, *u.AuthData, 67)
+					if mode == "missing_username" {
+						require.True(t, strings.HasPrefix(u.Username, "callback_"))
+					}
 				}
 				if mode != "popup" && mode != "mobile" {
 					require.Equal(t, 302, finish.Code)
@@ -1303,14 +1321,16 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 // signed OIDC exchange and encrypted KV implementation remain real in these tests.
 type credentialCallbackAPI struct {
 	*identityAPI
-	plugin          *Plugin
-	mode            string
-	credentialReads int
-	revokedIDs      []string
-	sessionID       string
-	sessionToken    string
-	sessionProps    model.StringMap
-	logs            strings.Builder
+	plugin            *Plugin
+	mode              string
+	credentialReads   int
+	revokedIDs        []string
+	sessionID         string
+	existingSessionID string
+	activeSessions    map[string]bool
+	sessionToken      string
+	sessionProps      model.StringMap
+	logs              strings.Builder
 }
 
 func (a *credentialCallbackAPI) CreateSession(s *model.Session) (*model.Session, *model.AppError) {
@@ -1321,6 +1341,7 @@ func (a *credentialCallbackAPI) CreateSession(s *model.Session) (*model.Session,
 	out.Id = model.NewId()
 	a.sessionToken, a.sessionProps = out.Token, out.Props
 	a.sessionID = out.Id
+	a.activeSessions[out.Id] = true
 	if a.mode == "wrong_session_user" {
 		out.UserId = model.NewId()
 	}
@@ -1334,6 +1355,7 @@ func (a *credentialCallbackAPI) CreateSession(s *model.Session) (*model.Session,
 }
 func (a *credentialCallbackAPI) RevokeSession(id string) *model.AppError {
 	a.revokedIDs = append(a.revokedIDs, id)
+	delete(a.activeSessions, id)
 	return nil
 }
 
