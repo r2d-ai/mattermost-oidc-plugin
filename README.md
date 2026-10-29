@@ -8,7 +8,8 @@ This repository is [r2d-ai's fork](https://github.com/r2d-ai/mattermost-oidc-plu
 of [server-camp/mattermost-oidc-plugin](https://github.com/server-camp/mattermost-oidc-plugin).
 It adds an approved issuer/subject identity registry, encrypted OIDC credential
 retention, distributed refresh/revocation, and an authenticated fixed Plane token
-broker. Ordinary web, Desktop popup, and mobile login are retained.
+broker. Web and mobile login are retained. Desktop uses upstream v0.7.0's system-browser
+login, adapted to this fork's identity and credential checks.
 
 First installs and upgrades from upstream require [identity bootstrap or reviewed legacy
 import](docs/oidc-identity-migration.md), even when delegated access is disabled.
@@ -19,8 +20,8 @@ identity gate blocks OIDC login; keep a separate native password administrator.
 - [Merge/backport procedure and required regression checks](docs/upstream-updates.md)
 - [Plane broker configuration, keys, API, and operational limits](docs/plane-broker-operations.md)
 
-The manifest remains `0.6.2` at the documented audit head. Upstream's matching
-version has different behavior. Identify builds by source SHA and archive SHA256.
+The manifest is `0.7.0` after integrating upstream tag `v0.7.0` at `cbb7bda`.
+Upstream's matching version has different identity and delegated-access behavior. Identify builds by source SHA and archive SHA256.
 
 ## Why this plugin?
 
@@ -62,13 +63,13 @@ Please note that the OIDC provider must support **PKCE S256** (standard with OAu
 6. Plugin resolves the approved issuer/subject binding, creates or updates the
    Mattermost user, and creates a session after current identity checks
 7. If credential persistence is enabled, plugin fences and optionally captures
-   encrypted credentials before completing web, Desktop popup, or mobile login
+   encrypted credentials before completing web, Desktop, or mobile login
 
 This covers **web and desktop** clients out of the box. For the **native mobile app**, an optional reverse-proxy shim ([`mobile-bridge/`](mobile-bridge/README.md)) is required — see [Native mobile app](#native-mobile-app) below.
 
 ## Prerequisites
 
-- **Go** compatible with `server/go.mod`, currently 1.26.7+
+- **Go** compatible with `server/go.mod`, currently 1.27.3+
 - **Node.js** 24 and npm, matching CI
 - **Make**
 - Mattermost / Mostlymatter Server v9.0+
@@ -84,7 +85,7 @@ cd mattermost-oidc-plugin
 make all
 
 # The bundle will be at:
-# dist/mattermost-oidc-0.6.2.tar.gz (version from plugin.json)
+# dist/mattermost-oidc-0.7.0.tar.gz (version from plugin.json)
 ```
 
 ### Build server or webapp only
@@ -104,6 +105,9 @@ make bundle SERVER_PLATFORMS=linux/amd64
 ```bash
 # Run Go tests with race detection
 make test
+
+# Desktop webapp tests
+(cd webapp && npm test)
 
 # Go linting (requires golangci-lint)
 make lint
@@ -184,6 +188,21 @@ does not disable delegated access. Turning either delegated setting off stops
 issuance but does not durably revoke stored credentials. See
 [Plane broker operations](docs/plane-broker-operations.md) before enabling them.
 
+#### Desktop app
+
+The Mattermost Desktop app signs in through the system browser and returns to the app via `mattermost://`. This requires that:
+
+- the app's server URL equals the configured `SiteURL`,
+- `mattermost://` is registered for the app, and
+- the identity provider is not served from the `SiteURL` origin.
+
+The system browser receives a one-time code, not a Mattermost session. The app
+redeems the code with its local verifier through `POST /oauth2/callback` within
+120 seconds. Redeem checks the current approved identity, callback policy and
+native auth before creating a session and completing optional credential capture.
+If the gate, binding, or callback policy changed, start a fresh login.
+
+
 ### 3. Approve the identity gate
 
 Use the [identity maintenance procedure](docs/oidc-identity-migration.md#maintenance-and-activation)
@@ -237,6 +256,7 @@ mattermost-oidc-plugin/
 │   ├── plugin.go            # Plugin struct, lifecycle, router
 │   ├── configuration.go     # Configuration type and validation
 │   ├── oauth2.go            # Verified callback, session/capture and completion
+│   ├── desktop.go           # Verifier-bound Desktop handoff and redeem
 │   ├── login_snapshot.go    # Coherent login configuration and fingerprints
 │   ├── identity_*.go        # Pair registry, gate, migration and admin commands
 │   ├── credential_store.go  # Encrypted CAS envelope and generation
@@ -247,7 +267,8 @@ mattermost-oidc-plugin/
 │   ├── package.json         # Node dependencies
 │   ├── webpack.config.js    # Webpack configuration
 │   └── src/
-│       └── index.js         # Login button React component
+│       ├── index.js         # Login button React component
+│       └── desktop_login.js # Desktop verifier, system browser and redeem
 └── mobile-bridge/           # Optional reverse-proxy shim for native mobile app
     ├── main.go              # Shim: client-config injection + mobile_login redirect
     ├── Dockerfile           # Container image for the shim
@@ -362,7 +383,7 @@ The repository uses GitHub Actions (`.github/workflows/ci.yml`):
 | `test-mobile-bridge` | every push / PR | Separate module vet and race tests |
 | `lint-server`   | every push / PR  | golangci-lint (non-blocking)                             |
 | `build-server`  | every push / PR  | Cross-compile for linux/darwin × amd64/arm64             |
-| `build-webapp`  | every push / PR  | `npm ci && webpack` production build                     |
+| `build-webapp`  | every push / PR  | `npm ci`, Desktop tests, and webpack production build                     |
 | `build-bundle`  | every push / PR  | Flat archive, manifest-artifact validation, validator fixtures |
 | `build-mobile-bridge` | every push / PR | Multi-architecture bridge image; published outside PRs |
 | `release`       | `v*` tags on main | Verify bundle version/executables and publish bundle plus SHA256SUMS |

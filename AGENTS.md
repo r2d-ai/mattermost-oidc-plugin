@@ -11,9 +11,9 @@ authentication, configuration, storage, or packaging. Before merging or
 backporting upstream changes, follow [the upstream update procedure](docs/upstream-updates.md).
 Upstream files and tests do not describe all of this fork's requirements.
 
-The audited common ancestor is upstream `v0.6.2`, `99920ca`. The fork manifest
-also says `0.6.2`; the version alone cannot distinguish upstream, this fork, or
-the deployed evidence build. Record source SHA and archive SHA256.
+The original common ancestor is upstream `v0.6.2`, `99920ca`. Upstream `v0.7.0`
+was integrated from `cbb7bda`; the manifest now says `0.7.0`. The version alone
+cannot distinguish upstream from this fork. Record source SHA and archive SHA256.
 
 ## Contracts to preserve
 
@@ -33,10 +33,14 @@ the deployed evidence build. Record source SHA and archive SHA256.
   session, credential, and release steps. Discovery results must obey both
   configuration revision and `discoveryAttempt` ordering.
 - Preserve HMAC state, atomic state consumption, PKCE S256, nonce, matching
-  userinfo subject, web/desktop state-cookie binding, cookie Domain/Path/lifetime,
-  desktop popup completion, and allowlisted mobile completion. The current fork
-  uses desktop popup login. Upstream's newer system-browser/redeem flow is not
-  integrated; its separate session endpoint needs fork authority checks too.
+  userinfo subject, web state-cookie binding, cookie Domain/Path/lifetime,
+  verifier-bound Desktop system-browser login, and allowlisted mobile completion.
+  Desktop redeems through `POST /oauth2/callback`, with the same verified session
+  and capture path as web/mobile. No session is created in the system browser.
+  Handoffs carry current binding/snapshot metadata and a checked 120-second expiry.
+  Optional tokens are AES-GCM ciphertext under the external ring, bound to the
+  code digest and handoff metadata. Expected-generation CAS prevents delayed
+  capture from replacing a later login/disconnect. Never use raw UUID-only codes.
 - `Enable` controls interactive login. `EnableTokenPersistence` controls capture.
   Delegated use requires both `EnableTokenPersistence` and `EnablePlaneBroker`,
   each default false, plus current identity authority. Disabling login alone
@@ -71,17 +75,18 @@ the deployed evidence build. Record source SHA and archive SHA256.
 | --- | --- |
 | `server/main.go`, `server/plugin.go` | Lifecycle, ordered discovery, routing, management-session guard, deactivation hook |
 | `server/configuration.go`, `plugin.json` | Settings, validation, independent delegated switches, deprecated email linking |
-| `server/oauth2.go`, `server/login_snapshot.go` | Verified callback, immutable provider/config snapshot, fingerprints, session and optional capture, web/popup/mobile completion |
+| `server/oauth2.go`, `server/login_snapshot.go` | Verified callback, immutable provider/config snapshot, fingerprints, session and optional capture, web/Desktop/mobile completion |
 | `server/identity_binding.go`, `server/identity_gate.go` | Pair/UUID registry, native auth expectations, durable gate/epoch, current binding assertions |
 | `server/identity_command.go`, `server/identity_migration.go` | `/oidc-identity` commands, fixed approval file, reviewed import/retain and activation |
 | `server/credential_store.go` | External AES ring, encrypted CAS envelope, generation and invalidation |
 | `server/token_lifecycle.go` | Distributed rotating refresh, exact-owner cleanup, disconnect and generation assertions |
 | `server/broker_auth.go`, `server/plane_broker.go` | Caller HMAC, durable nonce buckets, quotas, constrained exchange and signed output verification |
-| `webapp/src/index.js` | React login button, Desktop detection/popup, storage-event fallback, older-server DOM injection on `/login` |
+| `server/desktop.go` | Expiring single-use Desktop code, encrypted optional credential handoff, current authority at redeem |
+| `webapp/src/index.js`, `webapp/src/desktop_login.js` | React login button, Desktop system-browser/verifier flow, older-server DOM injection on `/login` |
 | `mobile-bridge/` | Separate Go module and ingress proxy, mobile config injection gated on plugin enable, mobile-login redirect |
 | `scripts/test_bundle*.py`, `Makefile`, `.github/workflows/ci.yml` | Archive validation, builds and release verification |
 
-Public plugin routes are `GET /oauth2/connect`, `GET /oauth2/callback`, and
+Public plugin routes are `GET /oauth2/connect`, `GET|POST /oauth2/callback`, and
 `GET /api/v1/config`. Additional routes are `POST /internal/plane-token`,
 `POST /api/v1/plane/disconnect`, and `POST /api/v1/plane/revoke`, under
 `/plugins/mattermost-oidc`. Unknown `/internal/` routes return 404.
@@ -89,7 +94,8 @@ Public plugin routes are `GET /oauth2/connect`, `GET /oauth2/callback`, and
 ## Build and verification
 
 Use Go compatible with `server/go.mod` and `mobile-bridge/go.mod`. The audited
-server minimum is 1.26.7. CI selects Go 1.26 and Node 24. React is external to
+server and bridge minimum is 1.27.3. CI reads Go versions from their modules
+and selects Node 24. React is external to
 the webpack UMD bundle and requires >=16.8.
 
 ```bash
@@ -103,11 +109,11 @@ python3 scripts/check_fork_docs.py
 python3 scripts/test_bundle_validator.py
 (cd server && go mod verify && go test -race ./... -count=1)
 (cd mobile-bridge && go vet ./... && go test -race ./... -count=1)
-(cd webapp && npm ci && npm run build)
+(cd webapp && npm ci && npm test && npm run build)
 ```
 
-`npm run dev` is a watch build, not a test. This fork's webapp has no test
-script. Server tests include signed TLS OIDC callbacks, shared fake durable KV,
+`npm run dev` is a watch build, not a test. `npm test` runs the Desktop
+webapp tests with Node's test runner. Server tests include signed TLS OIDC callbacks, shared fake durable KV,
 CAS recovery, encrypted capture, refresh races, management authorization, broker
 authentication and exchange. Run the full server race suite for auth changes;
 use the [contract-to-test map](docs/fork-differences.md#regression-test-map) to
@@ -133,7 +139,7 @@ of requested deployment/release work. `make clean` also removes node_modules.
   production approval, all-node quiescence, or atomic KV/core-session changes.
 
 CI verifies server modules/race tests, vets/tests the mobile bridge, builds four
-server targets and the webapp, validates the flat bundle, and builds the bridge
+server targets and tests/builds the webapp, validates the flat bundle, and builds the bridge
 image. The server linter is non-blocking. Release checks require the tag to be
 reachable from `main`, matching manifest version, executable artifacts, and
 checksums. The audit helper is currently a manual check, not a CI job.

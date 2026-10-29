@@ -49,7 +49,8 @@ Retain fork regression assertions when upstream renames or replaces test helpers
 
 ## Adapt session and desktop changes
 
-For upstream session refactors, especially PR #39's system-browser Desktop flow:
+Upstream PR #39's system-browser Desktop flow is integrated with fork checks
+as part of v0.7.0. Apply these rules to later session or transport refactors:
 
 1. Enumerate every place that creates a native session or releases a cookie,
    app token, or redeem code. Include delayed redemption and new HTTP handlers.
@@ -84,7 +85,7 @@ python3 scripts/check_fork_docs.py
 python3 scripts/test_bundle_validator.py
 (cd server && go mod verify && go test -race ./... -count=1)
 (cd mobile-bridge && go vet ./... && go test -race ./... -count=1)
-(cd webapp && npm ci && npm run build)
+(cd webapp && npm ci && npm test && npm run build)
 make all
 bundle_version=$(python3 -c 'import json; print(json.load(open("plugin.json"))["version"])')
 python3 scripts/test_bundle.py "dist/mattermost-oidc-${bundle_version}.tar.gz"

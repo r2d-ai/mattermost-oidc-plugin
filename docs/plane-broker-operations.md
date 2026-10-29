@@ -71,7 +71,7 @@ an active identity gate nor an active user. Do not delete/reset tombstones or
 create a second lifecycle counter.
 
 An initial fence failure or lost identity/snapshot authority fails the callback,
-revokes only its new native session, and releases no new cookie/mobile/popup
+revokes only its new native session, and releases no new cookie/mobile/Desktop
 session token. Once a fence is confirmed, missing keys or other optional
 encryption/publication failures can preserve valid login while that generation
 stays unavailable. A publication CAS error may have committed despite a lost
@@ -95,6 +95,36 @@ most ten years. Its absence, zero or malformed value leaves `RefreshExpiresAt`
 zero, meaning unknown, not unlimited. Providers may still revoke tokens sooner.
 Unknown expiry does not prove unlimited validity. The lifecycle refreshes once
 when needed and requires reconnect after any rejected or ambiguous refresh.
+
+## Desktop system-browser handoff
+
+Desktop authenticates in the system browser, then redeems a single-use code
+with the app's verifier through `POST /oauth2/callback`. The callback creates no
+Mattermost session and publishes no ready credential generation. A 120-second
+KV handoff records the exact binding, gate epoch, callback fingerprint, return
+path, and expiry. Redeem independently checks current authority and expiry.
+
+When persistence is enabled at callback, the handoff also records the current
+credential generation and optionally AES-GCM-encrypted access/refresh credentials.
+The external credential key ring supplies the key. AAD binds the code digest,
+key ID and all handoff metadata. ID tokens are excluded, raw provider credentials
+never enter KV, and a missing key has no state-HMAC fallback. The complete
+handoff is bounded to 64 KiB, and its encrypted plaintext is bounded to 32 KiB.
+These transient encrypted records also need the backup protections above.
+
+Only successful app redemption creates a session and attempts durable capture.
+Its initial fence uses the expected generation in the same CAS loop, so a
+handoff from before disconnect or a newer login cannot replace those credentials.
+An authority/fence failure withholds cookies and revokes only that new session.
+A missing key, unreadable optional ciphertext, missing refresh token or confirmed
+publication failure may preserve login after fencing, with delegated access
+unavailable until reconnect. Provider expiry timestamps stay absolute across
+the delay. Expired, consumed, or pre-fork UUID-only handoffs deny redemption.
+
+Persistence disabled at callback leaves no provider credentials or expected
+generation in the handoff. Enabling it before redeem does not invent the missing
+tokens; another fresh OIDC login is needed for capture. Disabling it before
+redeem skips capture. The broker switch remains independent of login/capture.
 
 ## Rotate or lose a key
 

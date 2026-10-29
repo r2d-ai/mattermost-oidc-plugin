@@ -6,6 +6,39 @@ to `server-camp/mattermost-oidc-plugin`. For integration steps, use
 [identity migration](oidc-identity-migration.md) and
 [Plane broker operations](plane-broker-operations.md).
 
+## Upstream v0.7.0 integration
+
+The fork now includes upstream tag `v0.7.0` at
+`cbb7bda137571bd255497787601618f3ff3e1f6f`, after the documentation commit
+`d4c0c9c`. The audit boundary and original ledger below remain a historical
+inventory of the original 15 fork commits, not the current manifest or upstream
+merge-base. `python3 scripts/check_fork_docs.py --upstream <ref>` reports current
+ancestry separately.
+
+The manifest is now `0.7.0`, both Go modules require 1.27.3, Mattermost's public
+SDK is 0.6.0, and go-jose 4.1.6 remains a direct dependency. CI obtains exact Go
+versions from each module. Webapp Desktop tests are now run by CI.
+
+Desktop popup login was replaced with upstream's system-browser flow. The app
+keeps a verifier, receives `authorize_url` from connect, opens the external IdP,
+and redeems the returned one-time code through `POST /oauth2/callback`. The fork
+adds exact identity/snapshot metadata and a checked 120-second expiry to that
+handoff. Optional credentials are AES-GCM ciphertext under the external ring,
+bound to the code digest and metadata. Only app redemption creates the native
+session and captures credentials through the shared verified login helper.
+Expected-generation fencing prevents a delayed handoff from undoing a later
+disconnect or replacing a newer login. Web browser-cookie binding, mobile
+completion, the identity gate/registry, delegated switches, refresh/broker
+contracts, and flat archive/release checks remain in force.
+
+Pending logins from before this upgrade must restart. Raw UUID-only upstream
+handoff records cannot redeem in this fork. The new transient
+`oidc_desktop_code_` records contain optional ciphertext and need the same backup
+controls as retained credentials. See [Desktop handoff operations](plane-broker-operations.md#desktop-system-browser-handoff)
+for optional key failure, switch timing, and cleanup behavior. Historical
+`cfbd710` installed evidence does not establish runtime acceptance of this merge.
+Automated results are recorded in [v0.7.0 merge verification](evidence/upstream-v0.7.0.md).
+
 ## Audit boundary
 
 Audit date: 2026-10-29. Commit membership was checked against fetched upstream
@@ -41,7 +74,7 @@ commits. Add `--upstream <fetched-ref>` to print current divergence and commit
 lists. The helper checks references, not behavioral compatibility, and reports
 when HEAD advances beyond the recorded audit boundary.
 
-## Inherited behavior
+## Behavior inherited at the original audit boundary
 
 The common ancestor already includes web login, native-mobile deep links and
 the optional mobile bridge, Desktop popup login with COOP storage fallback,
@@ -49,12 +82,13 @@ browser-bound state cookies, PKCE S256, nonce verification, email-verified and
 position claims, core-compatible cookie Domain/Path/lifetime/eviction, and
 discovery retry after activation failure. These are not fork inventions.
 
-`webapp/` and `mobile-bridge/` are unchanged between the common ancestor and the
-audit head. They still depend on the fork's updated callback retaining their
+`webapp/` and `mobile-bridge/` are unchanged between the original common ancestor
+and original audit head. The v0.7.0 integration changes the webapp and bridge
+Go/Docker toolchain as described above. They still depend on the fork's updated callback retaining their
 completion behavior. The plugin ID, public login/config paths, and upstream
 license remain unchanged.
 
-## Behavior added or deliberately changed
+## Original fork behavior added or deliberately changed
 
 | Area | Upstream at the common ancestor | Fork contract and owning files |
 | --- | --- | --- |
@@ -86,6 +120,7 @@ in [the operations reference](plane-broker-operations.md#authenticated-fixed-pla
 | `identity_v1_gate` | Durable approval status, epoch, issuer/client fingerprint, digest and receipt. Restart/config revert must preserve a frozen gate. |
 | `identity_v1_pair_`, `identity_v1_user_` | Pair-digest and UUID directions of the same registry record. Both must be committed and identical. Preserve digest serialization and native auth expectations. |
 | `credentials_v1_` | Digest of issuer/UUID selects one CAS envelope for encrypted credentials, refresh ownership/candidate, and invalidation. Never reset its generation or delete tombstones. |
+| `oidc_desktop_code_` | Added by the v0.7.0 integration. Code digest selects a 120-second single-use handoff with exact binding/snapshot metadata and optional encrypted credentials. These are not lifecycle generation records. |
 | `plane_nonce_v1_` | 4,096 fixed replay slots, up to 32 live nonce digests per bucket. New code reads legacy single-entry records; old code cannot read buckets. Drain admission for upgrades/rollback. |
 
 Exact pair/native-auth digest construction is documented in
@@ -134,31 +169,35 @@ specific entry points for review; this table is not a replacement for the suite.
 | Concurrent creation and ambiguous recovery | `TestConcurrentPairResolution`, `TestCreateResponseLostResumesSameUser`, `TestCreateResponseLostRenamedRefuses`, `TestCreateResponseLostChangedNativeAuthRefuses`, `TestNewAccountTeamInitializationResumes` |
 | Gate, approval, inactive retain, administrator authority | `TestMissingGateDenies`, `TestIssuerChangeFreezesAcrossNodes`, `TestIssuerReturnDoesNotReactivate`, `TestEmptyBootstrapRequiresExplicitCommands`, `TestIdentityApplyPartialResumeAfterReverseCommit`, `TestInactiveRetainedBindingAllowsMaintenanceButDeniesBroker`, `TestIdentityCommandAuthority`, `TestIdentityCommandStrictGrammar`, `TestActivationRequiresMaintenanceReceipt` |
 | Snapshot, secret rotation, discovery ordering and shared state key | `TestCallbackFingerprintEveryPolicy`, `TestCallbackSnapshotCannotMixProviders`, `TestSecretRotationOnlyInvalidatesCallback`, `TestCallbackSameRevisionDiscoveryCannotPublishOlderResult`, `TestStateKeyInitializationConvergesAcrossNodes` |
-| Full web/popup/mobile callback, userinfo/nonce/cookie checks, capture failures and existing sessions | `TestOAuth2CompleteCallback`, `TestLoginSucceedsWhenPersistenceFails`, `TestSetSessionCookie`, `TestGetCookiePath`, `TestRenderPopupAuthCompleteNoScriptInjection` |
+| Full web/mobile callback, userinfo/nonce/cookie checks, capture failures and existing sessions | `TestOAuth2CompleteCallback`, `TestLoginSucceedsWhenPersistenceFails`, `TestSetSessionCookie`, `TestGetCookiePath` |
 | Encryption, binding authentication, key loss, flags, publication ambiguity | `TestCredentialsNeverPersistPlaintext`, `TestEmptyRefreshTokenDoesNotPublishReadyCredentials`, `TestBindingTamperDenied`, `TestCredentialsCiphertextCannotMoveBetweenUsers`, `TestCredentialsAmbiguousPublication`, `TestCredentialsDisabledDeniesWarmSlot`, `TestCredentialsInvalidateWithFrozenGateAndNoKey` |
 | Refresh exclusivity, missing rotation, response loss, candidate/deadline rules and revocation | `TestConcurrentRefreshAcrossNodes`, `TestRefreshWithoutReplacementRequiresReconnect`, `TestRefreshResponseLostRequiresReconnect`, `TestLifecycleAmbiguousCandidateOrReadyCAS`, `TestLifecycleDelayedPublication`, `TestDisconnectWinsOverRefresh`, `TestLifecycleDeactivationFencesLateRefreshOwner` |
 | Session/CSRF boundary and frozen/inactive cleanup | `TestDisconnectSessionCSRFBoundary`, `TestAdminRevokeFrozenInactiveTarget`, `TestDeactivationHookFrozenCleanupAndFailure`, `TestDeactivationCleanupRequiresCorroboratedRegistry`, `TestDisconnectRevocationIsAfterFenceAndBestEffort` |
 | HMAC, replay, colliding buckets, restart/node behavior and quotas | `TestBrokerSignatureBindsBodyPathAndMethod`, `TestBrokerReplayAcrossNodesAndRestart`, `TestBrokerInternalTransport`, `TestBrokerCollidingNoncesAndReplay`, `TestBrokerNonceRetentionAndCleanup`, `TestBrokerIntegrationQuotaPrecedesReplayStorage`, `TestUnknownUserDoesNotConsumeUserQuota` |
 | Exchange output, availability classification, final authority and budgets | `TestBrokerNeverReturnsRefreshOrIDToken`, `TestBrokerRejectsSignedTokenProfile`, `TestBrokerFinalAuthority`, `TestBrokerCredentialRingLossAfterNetwork`, `TestBrokerCredentialRingLossDuringLifecycleError`, `TestBrokerCredentialGenerationFailuresRemainReconnect`, `TestBrokerWholeCallTenSecondBudget`, `TestBrokerLoginSwitchIndependence` |
+| Desktop authority, ciphertext, expiry, delayed generation and completion | `TestDesktopLogin`, `TestDesktopRedeemRechecksForkAuthority`, `TestDesktopCaptureOccursOnlyAtRedeem`, `TestDesktopHandoffRejectsExpiredAndLegacyRecords`, `TestDesktopFailureRevokesOnlyNewSession`, `TestDesktopHandoffCannotReplaceLaterCredentials`, `TestDesktopOptionalCaptureFailureFencesOldCredentials`, `TestDesktopDelayedCaptureCASCannotFenceConcurrentDisconnect`, `TestDesktopCancelledRedeemAndLostConsumeAcknowledgement`, `TestDesktopCodeIsSingleUse`, `TestDesktopPersistenceSwitchTiming` |
 | Mobile bridge | `TestHandleMobileLogin`, `TestRewriteClientConfig` in `mobile-bridge/main_test.go` |
 | Archive | `scripts/test_bundle_validator.py` plus `scripts/test_bundle.py` against the actual built archive; CI release checks executable bits and version |
 
-## Known upstream integration risk
+## Session and Desktop merge decisions
 
-At the observed upstream head, upstream PR #39 adds Desktop system-browser
-login and removes popup login. It extracts `createLoginSession`, introduces
-`server/desktop.go` and `/oauth2/desktop/redeem`, and exempts its new Desktop
-flow from the state cookie in favor of a verifier/code handoff. The fork still
-has the inherited popup flow and requires the cookie for web/popup callbacks.
+Upstream PR #39 extracts `createLoginSession` and removes popup login. Its
+Desktop code record originally holds only user UUID, challenge and return path.
+The fork adapts that flow instead of copying a UUID-only authorization path.
+Both callback and `POST /oauth2/callback` redeem now use the current approved
+binding and snapshot. The shared `createLoginSession` checks authority before
+core session creation and after optional credential publication, revoking only
+the attempt's new session if authority fails.
 
-The new upstream desktop code record holds user UUID, challenge, and return
-path. Those fields alone do not carry this fork's gate epoch, binding revision,
-callback fingerprint, or credential publication authority. Copying that flow
-without adapting both callback and redeem can create sessions outside fork
-checks or skip credential capture. This is a compatibility assessment of the
-upstream-to-fork merge, not a claim of an upstream vulnerability.
+The expected credential generation is checked inside the existing CAS fence
+loop, not in a separate read followed by an unconditional write. No second
+credential counter or tombstone reset was introduced. A temporary encrypted
+handoff is not usable through the store or broker until successful redemption
+publishes a normal ready credential generation.
 
-The upstream-only history also includes version/dependency/Go updates. None
-of those 14 commits has been integrated as part of this documentation audit.
-Use the [update procedure](upstream-updates.md#adapt-session-and-desktop-changes)
-before adopting their session refactors or Desktop transport.
+The merge keeps fork `AutoLinkByEmail` semantics, delegated defaults and routes,
+discovery attempt ordering, gate/registry formats, external key rings, exact
+broker validation, and flat archive verification. One go-jose direct dependency
+entry is retained at the upstream version; the mechanical merge's duplicate
+old direct requirement was removed. The [upstream update procedure](upstream-updates.md)
+continues to apply to future session refactors.

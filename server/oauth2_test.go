@@ -152,51 +152,6 @@ func TestStateSignAndVerify(t *testing.T) {
 	}
 }
 
-func TestRenderPopupAuthComplete(t *testing.T) {
-	p := &Plugin{}
-
-	rec := httptest.NewRecorder()
-	p.renderPopupAuthComplete(rec, "https://mm.example.com", "/team/channel")
-
-	res := rec.Result()
-	if res.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200", res.StatusCode)
-	}
-	if cc := res.Header.Get("Cache-Control"); !strings.Contains(cc, "no-store") {
-		t.Errorf("Cache-Control = %q, want it to contain no-store", cc)
-	}
-
-	body := rec.Body.String()
-
-	// The target must be embedded as a safe JS string literal (json-encoded).
-	if !strings.Contains(body, `var target = "https://mm.example.com/team/channel"`) {
-		t.Errorf("body missing json-encoded target; got:\n%s", body)
-	}
-	// The popup hands control back to the opener and broadcasts via localStorage.
-	if !strings.Contains(body, "window.opener") {
-		t.Error("body should navigate window.opener")
-	}
-	if !strings.Contains(body, "mattermost_oidc_login") {
-		t.Error("body should broadcast completion via localStorage key")
-	}
-}
-
-// TestRenderPopupAuthCompleteNoScriptInjection ensures a return path crafted to
-// break out of the <script> block is neutralised by the json/HTML escaping.
-func TestRenderPopupAuthCompleteNoScriptInjection(t *testing.T) {
-	p := &Plugin{}
-
-	rec := httptest.NewRecorder()
-	// A hostile-looking path (it would already be rejected upstream, but the render
-	// must be safe regardless of what reaches it).
-	p.renderPopupAuthComplete(rec, "https://mm.example.com", `/x</script><script>alert(1)</script>`)
-
-	body := rec.Body.String()
-	if strings.Contains(body, "<script>alert(1)</script>") {
-		t.Errorf("unescaped </script> breakout present in body:\n%s", body)
-	}
-}
-
 func TestStateCookieMatches(t *testing.T) {
 	const token = "abc123deadbeef"
 
@@ -639,6 +594,7 @@ func TestGetCookiePath(t *testing.T) {
 // quietAPI drops log calls, which plugintest.API would reject as unexpected.
 type quietAPI struct{ *plugintest.API }
 
+func (quietAPI) LogDebug(string, ...any) {}
 func (quietAPI) LogInfo(string, ...any)  {}
 func (quietAPI) LogWarn(string, ...any)  {}
 func (quietAPI) LogError(string, ...any) {}
@@ -1041,7 +997,7 @@ func TestOnActivateAndConfigChangeDoNotRedundantlyInitProvider(t *testing.T) {
 // Runs the complete callback against a signed TLS OIDC provider. Tokens remain in
 // test memory; mutation counters prove failures happen before account/session effects.
 func TestOAuth2CompleteCallback(t *testing.T) {
-	runCredentialCallbacks(t, []string{"web", "popup", "mobile", "secret_fresh", "secret_before", "secret_during", "wrong_userinfo", "wrong_nonce", "missing_cookie", "epoch_before", "session_failure", "wrong_session_user", "native_changed", "authority_after_session", "authority_after_capture", "snapshot_after_capture", "legacy", "invalid_signature"})
+	runCredentialCallbacks(t, []string{"web", "mobile", "secret_fresh", "secret_before", "secret_during", "wrong_userinfo", "wrong_nonce", "missing_cookie", "epoch_before", "session_failure", "wrong_session_user", "native_changed", "authority_after_session", "authority_after_capture", "snapshot_after_capture", "legacy", "invalid_signature"})
 }
 
 func TestLoginSucceedsWhenPersistenceFails(t *testing.T) {
@@ -1177,9 +1133,7 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 				require.NoError(t, p.initOIDCProvider())
 			}
 			target := "/oauth2/connect"
-			if mode == "popup" {
-				target += "?popup=1"
-			}
+
 			if mode == "mobile" {
 				target += "?mobile_redirect=mmauth%3A%2F%2Fcallback"
 			}
@@ -1229,7 +1183,7 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 			}
 			require.NotContains(t, public.Body.String(), "EnableTokenPersistence")
 			require.NotContains(t, public.Body.String(), "MM_OIDC_CREDENTIAL")
-			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during" || mode == "missing_refresh" || mode == "missing_username"
+			success := mode == "web" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during" || mode == "missing_refresh" || mode == "missing_username"
 			for _, v := range a.kv {
 				require.NotContains(t, string(v), "test-access")
 				require.NotContains(t, string(v), "test-refresh")
@@ -1255,7 +1209,7 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 					require.False(t, strings.HasPrefix(k, credentialPrefix))
 				}
 			}
-			if mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" {
+			if mode == "web" || mode == "mobile" || mode == "secret_fresh" {
 				for _, u := range a.users {
 					c, err := newCredentialStore(p).Load(context.Background(), IdentityBinding{Issuer: issuer, Subject: "s", MattermostUserID: u.Id})
 					require.NoError(t, err)
@@ -1288,7 +1242,7 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 						require.True(t, strings.HasPrefix(u.Username, "callback_"))
 					}
 				}
-				if mode != "popup" && mode != "mobile" {
+				if mode != "mobile" {
 					require.Equal(t, 302, finish.Code)
 				} else {
 					require.Equal(t, 200, finish.Code)

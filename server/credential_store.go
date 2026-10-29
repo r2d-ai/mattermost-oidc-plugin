@@ -128,7 +128,7 @@ func (s *CredentialStore) read(b IdentityBinding) (credentialEnvelope, []byte, e
 
 // fence advances the only credential generation. It does not require a key,
 // active gate or native user, so explicit invalidation works after revocation.
-func (s *CredentialStore) fence(ctx context.Context, b IdentityBinding) (credentialEnvelope, []byte, error) {
+func (s *CredentialStore) fence(ctx context.Context, b IdentityBinding, expectedGeneration *uint64) (credentialEnvelope, []byte, error) {
 	if !validCredentialBinding(b) {
 		return credentialEnvelope{}, nil, ErrCredentialFence
 	}
@@ -141,7 +141,7 @@ func (s *CredentialStore) fence(ctx context.Context, b IdentityBinding) (credent
 			return credentialEnvelope{}, nil, ErrCredentialFence
 		}
 		previous, raw, err := s.read(b)
-		if err != nil || previous.Generation == math.MaxUint64 {
+		if err != nil || previous.Generation == math.MaxUint64 || (expectedGeneration != nil && previous.Generation != *expectedGeneration) {
 			return credentialEnvelope{}, nil, ErrCredentialFence
 		}
 		next := credentialEnvelope{Format: 1, State: "invalidated", Generation: previous.Generation + 1, Owner: owner}
@@ -158,7 +158,7 @@ func (s *CredentialStore) fence(ctx context.Context, b IdentityBinding) (credent
 }
 
 func (s *CredentialStore) Invalidate(ctx context.Context, binding IdentityBinding) error {
-	_, _, err := s.fence(ctx, binding)
+	_, _, err := s.fence(ctx, binding, nil)
 	return err
 }
 
@@ -229,7 +229,7 @@ func (s *CredentialStore) current(ctx context.Context, b IdentityBinding, epoch,
 }
 
 func (s *CredentialStore) Save(ctx context.Context, credentials StoredCredentials) error {
-	_, err := s.save(ctx, credentials)
+	_, err := s.save(ctx, credentials, nil)
 	return err
 }
 
@@ -238,7 +238,7 @@ type credentialPublication struct {
 	ready    []byte
 }
 
-func (s *CredentialStore) save(ctx context.Context, credentials StoredCredentials) (*credentialPublication, error) {
+func (s *CredentialStore) save(ctx context.Context, credentials StoredCredentials, expectedGeneration *uint64) (*credentialPublication, error) {
 	if !s.plugin.getConfiguration().EnableTokenPersistence {
 		return nil, ErrCredentialsUnavailable
 	}
@@ -246,7 +246,7 @@ func (s *CredentialStore) save(ctx context.Context, credentials StoredCredential
 	if err != nil {
 		return nil, err
 	}
-	env, fenced, err := s.fence(ctx, credentials.Binding)
+	env, fenced, err := s.fence(ctx, credentials.Binding, expectedGeneration)
 	if err != nil {
 		return nil, err
 	}
