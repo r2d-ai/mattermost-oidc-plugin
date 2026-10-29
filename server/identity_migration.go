@@ -145,7 +145,7 @@ func parseApprovalMap(b []byte) (approvalMap, error) {
 		if r.Action == "import_legacy" && (r.ExpectedBindingRevision != 0 || r.ExpectedLegacyMapping != r.MattermostUserID || r.ExpectedAuthData != r.Subject) {
 			return m, ErrIdentityConflict
 		}
-		if r.Action == "retain" && (r.ExpectedLegacyMapping != "" || r.ExpectedBindingRevision == 0) {
+		if r.Action == "retain" && (r.ExpectedLegacyMapping != "" || r.ExpectedBindingRevision == 0 || r.ExpectedAuthData == "") {
 			return m, ErrIdentityConflict
 		}
 		pairs[key] = true

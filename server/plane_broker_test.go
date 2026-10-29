@@ -487,3 +487,12 @@ func TestBrokerCredentialGenerationFailuresRemainReconnect(t *testing.T) {
 		})
 	}
 }
+
+func TestBrokerEndpointRejectsNoncanonicalURLs(t *testing.T) {
+	issuer := "https://issuer.example"
+	require.True(t, brokerEndpoint(issuer, issuer+"/protocol/token"))
+	for _, path := range []string{"/x%2fy", "/x#fragment", "/x?", "/x?foo=bar"} {
+		require.False(t, brokerEndpoint(issuer, issuer+path), path)
+	}
+	require.False(t, brokerEndpoint(issuer, "https://other.example/token"))
+}

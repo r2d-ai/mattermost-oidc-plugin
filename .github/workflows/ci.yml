@@ -57,6 +57,7 @@ jobs:
       - name: Test
         working-directory: server
         run: |
+          go mod verify
           go test ./... -v -race -count=1 -coverprofile=coverage.out
           go tool cover -func=coverage.out
 
@@ -189,7 +190,9 @@ jobs:
           chmod +x dist/${PLUGIN_ID}/server/dist/*
           cp webapp/dist/main.js dist/${PLUGIN_ID}/webapp/dist/
           if [ -d assets ]; then cp -r assets/* dist/${PLUGIN_ID}/assets/ 2>/dev/null || true; fi
-          cd dist && tar -czf ${PLUGIN_ID}-${PLUGIN_VERSION}.tar.gz ${PLUGIN_ID}
+          tar -czf dist/${PLUGIN_ID}-${PLUGIN_VERSION}.tar.gz -C dist/${PLUGIN_ID} plugin.json server webapp assets
+          python3 scripts/test_bundle.py dist/${PLUGIN_ID}-${PLUGIN_VERSION}.tar.gz
+          python3 scripts/test_bundle_validator.py
 
       - uses: actions/upload-artifact@v7
         with:
@@ -298,7 +301,7 @@ jobs:
 
           bundle, plugin_id, version = sys.argv[1:]
           with tarfile.open(bundle, "r:gz") as archive:
-              manifest = json.load(archive.extractfile(f"{plugin_id}/plugin.json"))
+              manifest = json.load(archive.extractfile("plugin.json"))
               if manifest.get("id") != plugin_id:
                   raise SystemExit(f"unexpected plugin id: {manifest.get('id')!r}")
               if manifest.get("version") != version:
@@ -309,12 +312,12 @@ jobs:
               expected = list(manifest["server"]["executables"].values())
               expected.append(manifest["webapp"]["bundle_path"])
               for path in expected:
-                  member = archive.getmember(f"{plugin_id}/{path}")
+                  member = archive.getmember(path)
                   if not member.isfile() or member.size == 0:
                       raise SystemExit(f"missing or empty bundle file: {path}")
 
               for platform, path in manifest["server"]["executables"].items():
-                  member = archive.getmember(f"{plugin_id}/{path}")
+                  member = archive.getmember(path)
                   if not member.mode & 0o111:
                       raise SystemExit(f"server binary is not executable: {platform} -> {path}")
           PY

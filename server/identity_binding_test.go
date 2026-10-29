@@ -234,6 +234,20 @@ func TestPartialRegistryNeverAuthorizes(t *testing.T) {
 	a.readFail = true
 	require.ErrorIs(t, p.AssertCurrentBinding(context.Background(), r), ErrIdentityUnavailable)
 }
+func TestBrokerRejectsPartiallyCommittedPair(t *testing.T) {
+	p, a, s := fixtureIdentity(t)
+	r, _, err := resolveTest(p, s)
+	require.NoError(t, err)
+	key := pairKey(r.Binding)
+	var record identityRecord
+	require.NoError(t, json.Unmarshal(a.kv[key], &record))
+	record.State = "pending"
+	a.kv[key], err = json.Marshal(record)
+	require.NoError(t, err)
+	_, err = p.ResolveBrokerBinding(context.Background(), r.Binding.MattermostUserID)
+	require.Error(t, err)
+}
+
 func TestConcurrentPairResolution(t *testing.T) {
 	p, a, s := fixtureIdentity(t)
 	q := &Plugin{encryptionKey: "test-shared-key"}

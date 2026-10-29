@@ -294,8 +294,12 @@ func (p *Plugin) retryOIDCProvider() {
 
 // ServeHTTP routes incoming HTTP requests to the plugin's router.
 func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/internal/") {
+	if r.URL.Path == brokerLocalPath {
 		p.handlePlaneBroker(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/internal/") {
+		http.NotFound(w, r)
 		return
 	}
 	if r.URL.Path == "/api/v1/plane/disconnect" || r.URL.Path == "/api/v1/plane/revoke" {

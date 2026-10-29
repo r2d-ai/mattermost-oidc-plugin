@@ -59,6 +59,18 @@ func TestCredentialsNeverPersistPlaintext(t *testing.T) {
 	require.Equal(t, uint64(1), loaded.Version)
 }
 
+func TestEmptyRefreshTokenDoesNotPublishReadyCredentials(t *testing.T) {
+	_, _, r, store, c := credentialFixture(t)
+	require.NoError(t, store.Save(context.Background(), c))
+	c.RefreshToken = ""
+	require.ErrorIs(t, store.Save(context.Background(), c), ErrCredentialsUnavailable)
+	env, _, err := store.read(r.Binding)
+	require.NoError(t, err)
+	require.Equal(t, "invalidated", env.State)
+	_, err = store.Load(context.Background(), r.Binding)
+	require.Error(t, err)
+}
+
 func TestBindingTamperDenied(t *testing.T) {
 	for _, mutation := range []string{"ciphertext", "nonce", "unknown_key", "refreshing", "format", "generation", "owner", "subject", "revision", "epoch", "native", "deleted", "bot"} {
 		t.Run(mutation, func(t *testing.T) {

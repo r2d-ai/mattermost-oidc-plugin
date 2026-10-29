@@ -255,7 +255,7 @@ func (s *CredentialStore) save(ctx context.Context, credentials StoredCredential
 	if err != nil {
 		return nil, err
 	}
-	if credentials.AccessToken == "" || len(credentials.AccessToken)+len(credentials.RefreshToken) > 32768 {
+	if credentials.AccessToken == "" || credentials.RefreshToken == "" || len(credentials.AccessToken)+len(credentials.RefreshToken) > 32768 {
 		return nil, ErrCredentialsUnavailable
 	}
 	aead, err := credentialAEAD(keys[active])

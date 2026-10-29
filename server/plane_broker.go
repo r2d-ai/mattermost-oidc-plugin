@@ -253,7 +253,7 @@ func brokerEndpoint(issuer, endpoint string) bool {
 	}
 	a, _ := url.Parse(issuer)
 	b, _ := url.Parse(endpoint)
-	return a.Scheme == b.Scheme && a.Host == b.Host && b.RawQuery == ""
+	return a.Scheme == b.Scheme && a.Host == b.Host && b.User == nil && b.RawQuery == "" && b.Fragment == "" && b.RawPath == "" && !b.ForceQuery
 }
 func (p *Plugin) exchangePlaneToken(ctx context.Context, cfg *Configuration, b IdentityBinding, subject, scope string) (string, int64, error) {
 	fail := func() (string, int64, error) { return "", 0, ErrTemporarilyUnavailable }

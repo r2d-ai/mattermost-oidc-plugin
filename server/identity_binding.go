@@ -127,6 +127,10 @@ func (p *Plugin) ResolveBrokerBinding(ctx context.Context, id string) (ResolvedI
 	if r.Binding.MattermostUserID != id || r.Binding.Issuer != g.Issuer {
 		return ResolvedIdentity{}, ErrIdentityConflict
 	}
+	r, _, e = p.committedIdentity(r.Binding)
+	if e != nil {
+		return ResolvedIdentity{}, e
+	}
 	b := resolved(r, g)
 	return b, p.AssertCurrentBinding(ctx, b)
 }

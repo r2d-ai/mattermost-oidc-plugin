@@ -125,6 +125,17 @@ func TestConcurrentRefreshAcrossNodes(t *testing.T) {
 	require.NoError(t, e)
 	require.Equal(t, "refresh-new", c.RefreshToken)
 }
+func TestRefreshWithoutReplacementRequiresReconnect(t *testing.T) {
+	p, _, r, store, _ := lifecycleFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"access-new","token_type":"Bearer","expires_in":300}`))
+	})
+	_, err := newTokenLifecycle(p).UserAccessToken(context.Background(), r.Binding)
+	require.ErrorIs(t, err, ErrReconnectRequired)
+	env, _, err := store.read(r.Binding)
+	require.NoError(t, err)
+	require.Equal(t, "invalidated", env.State)
+}
+
 func TestRefreshResponseLostRequiresReconnect(t *testing.T) {
 	var calls atomic.Int32
 	p, _, r, store, _ := lifecycleFixture(t, func(w http.ResponseWriter, _ *http.Request) {

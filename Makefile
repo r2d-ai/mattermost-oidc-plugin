@@ -47,7 +47,7 @@ bundle: server webapp
 	@cp webapp/dist/main.js dist/$(PLUGIN_ID)/webapp/dist/
 	@mkdir -p dist/$(PLUGIN_ID)/assets
 	@if [ -d assets ]; then cp -r assets/* dist/$(PLUGIN_ID)/assets/ 2>/dev/null || true; fi
-	@tar -czf dist/$(BUNDLE_NAME) -C dist/$(PLUGIN_ID) plugin.json server webapp assets
+	@COPYFILE_DISABLE=1 tar -czf dist/$(BUNDLE_NAME) -C dist/$(PLUGIN_ID) plugin.json server webapp assets
 	@python3 scripts/test_bundle.py dist/$(BUNDLE_NAME)
 	@echo "Plugin bundle created: dist/$(BUNDLE_NAME)"
 
