@@ -1,12 +1,24 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	oidc "github.com/coreos/go-oidc/v3/oidc"
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
@@ -659,6 +671,10 @@ func newDiscoveryTestPlugin(t *testing.T, up *atomic.Bool, hits *atomic.Int32, o
 	api := &plugintest.API{}
 	api.On("GetConfig").Return(&model.Config{ServiceSettings: model.ServiceSettings{SiteURL: model.NewPointer("https://mm.example.com")}})
 	api.On("KVSetWithExpiry", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	gateBytes, _ := json.Marshal(identityGate{Version: 1, Status: "active", Epoch: 2, Issuer: issuer, ClientID: "mattermost", IdentityFingerprint: identityFingerprint(issuer, "mattermost")})
+	api.On("KVGet", identityGateKey).Return(gateBytes, nil)
+	api.On("KVCompareAndSet", identityGateKey, mock.Anything, mock.Anything).Return(true, nil)
+	api.On("RegisterCommand", mock.Anything).Return(nil)
 
 	p := &Plugin{encryptionKey: "test-key", discoveryClient: idp.Client()}
 	p.SetAPI(quietAPI{api})
@@ -692,8 +708,8 @@ func TestConnectRetriesDiscoveryAtMostOncePerInterval(t *testing.T) {
 	for range 3 {
 		rec := httptest.NewRecorder()
 		p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
-		if rec.Code != http.StatusInternalServerError {
-			t.Fatalf("got %d while the issuer is down, want 500", rec.Code)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("got %d while the issuer is down, want 503", rec.Code)
 		}
 	}
 	if got := hits.Load(); got != 2 {
@@ -713,8 +729,8 @@ func TestConnectDoesNotRetryInvalidConfiguration(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
 
-	if rec.Code != http.StatusInternalServerError || hits.Load() != 0 {
-		t.Fatalf("got %d after %d discovery calls, want 500 and none", rec.Code, hits.Load())
+	if rec.Code != http.StatusServiceUnavailable || hits.Load() != 0 {
+		t.Fatalf("got %d after %d discovery calls, want 503 and none", rec.Code, hits.Load())
 	}
 }
 
@@ -774,8 +790,8 @@ func TestOnConfigurationChangeDiscardsOldProviderOnInvalidConfig(t *testing.T) {
 	// Login attempt must fail fast with 500, not redirect to the old provider.
 	rec := httptest.NewRecorder()
 	p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("got status %d, want 500", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got status %d, want 503", rec.Code)
 	}
 }
 
@@ -843,8 +859,8 @@ func TestOnConfigurationChangeDiscardsOldProviderOnFailedDiscovery(t *testing.T)
 	newUp.Store(true)
 	rec := httptest.NewRecorder()
 	p.handleOAuth2Connect(rec, httptest.NewRequest(http.MethodGet, "/oauth2/connect", nil))
-	if rec.Code != http.StatusFound || !strings.HasPrefix(rec.Header().Get("Location"), newIssuer+"/auth?") {
-		t.Fatalf("got %d to %q, want redirect to new issuer %s", rec.Code, rec.Header().Get("Location"), newIssuer)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("changed issuer must require explicit activation, got %d", rec.Code)
 	}
 }
 
@@ -1020,4 +1036,360 @@ func TestOnActivateAndConfigChangeDoNotRedundantlyInitProvider(t *testing.T) {
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("discovery hits after changed OnConfigurationChange = %d, want 2", got)
 	}
+}
+
+// Runs the complete callback against a signed TLS OIDC provider. Tokens remain in
+// test memory; mutation counters prove failures happen before account/session effects.
+func TestOAuth2CompleteCallback(t *testing.T) {
+	runCredentialCallbacks(t, []string{"web", "popup", "mobile", "secret_fresh", "secret_before", "secret_during", "wrong_userinfo", "wrong_nonce", "missing_cookie", "epoch_before", "session_failure", "wrong_session_user", "native_changed", "authority_after_session", "authority_after_capture", "snapshot_after_capture", "legacy", "invalid_signature"})
+}
+
+func TestLoginSucceedsWhenPersistenceFails(t *testing.T) {
+	runCredentialCallbacks(t, []string{"missing_key", "publication_failure", "fence_failure", "persistence_disabled", "flag_during", "missing_refresh", "missing_username"})
+}
+
+func runCredentialCallbacks(t *testing.T, modes []string) {
+	t.Helper()
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			credentialKeys(t, "current", map[string]string{"current": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))})
+			key, e := rsa.GenerateKey(rand.Reader, 2048)
+			require.NoError(t, e)
+			signer, e := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, nil)
+			require.NoError(t, e)
+			var issuer, nonce, challenge, issuedIDToken string
+			exchanges := 0
+			var p *Plugin
+			idp := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/.well-known/openid-configuration":
+					_ = json.NewEncoder(w).Encode(map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/auth", "token_endpoint": issuer + "/token", "userinfo_endpoint": issuer + "/userinfo", "jwks_uri": issuer + "/keys"})
+				case "/keys":
+					_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, Algorithm: "RS256", Use: "sig"}}})
+				case "/userinfo":
+					sub := "s"
+					if mode == "wrong_userinfo" {
+						sub = "other"
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"sub": sub})
+				case "/token":
+					exchanges++
+					_ = r.ParseForm()
+					sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+					require.Equal(t, challenge, base64.RawURLEncoding.EncodeToString(sum[:]))
+					if mode == "flag_during" {
+						cfg := p.getConfiguration()
+						cfg.EnableTokenPersistence = false
+						p.setConfiguration(cfg)
+					}
+					if mode == "secret_during" {
+						cfg := p.getConfiguration()
+						cfg.ClientSecret = "rotated"
+						p.setConfiguration(cfg)
+					}
+					signedNonce := nonce
+					if mode == "wrong_nonce" {
+						signedNonce = "other"
+					}
+					claimValues := map[string]any{"iss": issuer, "sub": "s", "aud": "client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": signedNonce, "email": "callback@example.com", "preferred_username": "callback", "email_verified": true}
+					if mode == "missing_username" {
+						delete(claimValues, "preferred_username")
+					}
+					claims, _ := json.Marshal(claimValues)
+					obj, e := signer.Sign(claims)
+					require.NoError(t, e)
+					if mode == "invalid_signature" {
+						other, err := rsa.GenerateKey(rand.Reader, 2048)
+						require.NoError(t, err)
+						otherSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: other}, nil)
+						require.NoError(t, err)
+						obj, e = otherSigner.Sign(claims)
+						require.NoError(t, e)
+					}
+					jwt, e := obj.CompactSerialize()
+					require.NoError(t, e)
+					issuedIDToken = jwt
+					response := map[string]any{"access_token": "test-access", "refresh_token": "test-refresh", "expires_in": 300, "refresh_expires_in": 600, "token_type": "Bearer", "id_token": jwt}
+					if mode == "missing_refresh" {
+						delete(response, "refresh_token")
+					}
+					_ = json.NewEncoder(w).Encode(response)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer idp.Close()
+			issuer = idp.URL
+			a := newIdentityAPI()
+			if mode == "missing_username" {
+				existing := &model.User{Id: model.NewId(), Username: "callback", Email: "other@example.com"}
+				a.users[existing.Id] = existing
+			}
+			callbackAPI := &credentialCallbackAPI{identityAPI: a, mode: mode, existingSessionID: model.NewId()}
+			callbackAPI.activeSessions = map[string]bool{callbackAPI.existingSessionID: true}
+			p = &Plugin{encryptionKey: "shared-key", discoveryClient: idp.Client()}
+			callbackAPI.plugin = p
+			p.SetAPI(callbackAPI)
+			p.setConfiguration(&Configuration{Enable: true, EnableTokenPersistence: true, EnablePlaneBroker: true, IssuerURL: issuer, ClientID: "client", ClientSecret: "secret", AutoCreateAccounts: true, EmailClaim: "email", UsernameClaim: "preferred_username", EmailVerifiedClaim: "email_verified", RequireEmailVerified: true})
+			a.kv[identityGateKey], _ = json.Marshal(identityGate{Version: 1, Status: "active", Epoch: 2, Issuer: issuer, ClientID: "client", IdentityFingerprint: identityFingerprint(issuer, "client")})
+			if mode == "persistence_disabled" {
+				cfg := p.getConfiguration()
+				cfg.EnableTokenPersistence = false
+				p.setConfiguration(cfg)
+				a.failKey = credentialPrefix
+			}
+			if mode == "fence_failure" {
+				a.failKey = credentialPrefix
+			}
+			if mode == "missing_key" {
+				t.Setenv("MM_OIDC_CREDENTIAL_KEYS", "{}")
+			}
+			if mode == "legacy" {
+				a.kv[KVOIDCUserPrefix+"s"] = []byte(model.NewId())
+			}
+			if mode == "authority_after_capture" || mode == "snapshot_after_capture" || mode == "publication_failure" {
+				a.beforeCAS = func(k string, old, next []byte) *model.AppError {
+					if strings.HasPrefix(k, credentialPrefix) && bytes.Contains(next, []byte(`"state":"ready"`)) {
+						if mode == "publication_failure" {
+							return failAPI()
+						}
+						if mode == "snapshot_after_capture" {
+							cfg := p.getConfiguration()
+							cfg.ClientSecret = "changed-after-capture"
+							p.setConfiguration(cfg)
+							return nil
+						}
+						a.mu.Lock()
+						for _, u := range a.users {
+							u.DeleteAt = 1
+						}
+						a.mu.Unlock()
+					}
+					return nil
+				}
+			}
+			require.NoError(t, p.initOIDCProvider())
+			if mode == "secret_fresh" {
+				cfg := p.getConfiguration()
+				cfg.ClientSecret = "rotated"
+				p.setConfiguration(cfg)
+				require.NoError(t, p.initOIDCProvider())
+			}
+			target := "/oauth2/connect"
+			if mode == "popup" {
+				target += "?popup=1"
+			}
+			if mode == "mobile" {
+				target += "?mobile_redirect=mmauth%3A%2F%2Fcallback"
+			}
+			start := httptest.NewRecorder()
+			p.handleOAuth2Connect(start, httptest.NewRequest("GET", target, nil))
+			require.Equal(t, 302, start.Code)
+			location, e := url.Parse(start.Header().Get("Location"))
+			require.NoError(t, e)
+			nonce = location.Query().Get("nonce")
+			challenge = location.Query().Get("code_challenge")
+			require.NotEmpty(t, nonce)
+			require.Equal(t, "S256", location.Query().Get("code_challenge_method"))
+			require.NotContains(t, location.RawQuery, "fingerprint")
+			if mode == "secret_before" {
+				cfg := p.getConfiguration()
+				cfg.ClientSecret = "rotated"
+				p.setConfiguration(cfg)
+				require.NoError(t, p.initOIDCProvider())
+			}
+			if mode == "epoch_before" {
+				_, e = p.freezeIdentityGate()
+				require.NoError(t, e)
+			}
+			req := httptest.NewRequest("GET", "/oauth2/callback?code=fixture&state="+url.QueryEscape(location.Query().Get("state")), nil).WithContext(oidc.ClientContext(context.Background(), idp.Client()))
+			if mode != "missing_cookie" {
+				for _, cookie := range start.Result().Cookies() {
+					req.AddCookie(cookie)
+				}
+			}
+			finish := httptest.NewRecorder()
+			p.handleOAuth2Callback(finish, req)
+			public := httptest.NewRecorder()
+			p.handleGetPublicConfig(public, httptest.NewRequest("GET", "/api/v1/config", nil))
+			keyValue := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+			for _, secret := range []string{"test-access", "test-refresh", keyValue} {
+				require.NotContains(t, public.Body.String(), secret)
+				require.NotContains(t, finish.Header().Get("Set-Cookie"), secret)
+				require.NotContains(t, callbackAPI.logs.String(), secret)
+				for _, v := range a.kv {
+					require.NotContains(t, string(v), secret)
+				}
+			}
+			if issuedIDToken != "" {
+				for _, v := range a.kv {
+					require.NotContains(t, string(v), issuedIDToken)
+				}
+			}
+			require.NotContains(t, public.Body.String(), "EnableTokenPersistence")
+			require.NotContains(t, public.Body.String(), "MM_OIDC_CREDENTIAL")
+			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during" || mode == "missing_refresh" || mode == "missing_username"
+			for _, v := range a.kv {
+				require.NotContains(t, string(v), "test-access")
+				require.NotContains(t, string(v), "test-refresh")
+			}
+			require.NotContains(t, finish.Body.String(), "test-access")
+			require.NotContains(t, finish.Body.String(), "test-refresh")
+			for _, v := range callbackAPI.sessionProps {
+				require.NotContains(t, v, "test-access")
+				require.NotContains(t, v, "test-refresh")
+			}
+			if mode == "fence_failure" || mode == "authority_after_session" || mode == "authority_after_capture" || mode == "snapshot_after_capture" || mode == "native_changed" || mode == "wrong_session_user" {
+				require.Equal(t, []string{callbackAPI.sessionID}, callbackAPI.revokedIDs)
+				require.True(t, callbackAPI.activeSessions[callbackAPI.existingSessionID])
+				require.False(t, callbackAPI.activeSessions[callbackAPI.sessionID])
+				require.NotContains(t, finish.Body.String(), callbackAPI.sessionToken)
+				for _, cookie := range finish.Result().Cookies() {
+					require.NotEqual(t, "MMAUTHTOKEN", cookie.Name)
+				}
+			}
+			if mode == "persistence_disabled" || mode == "flag_during" {
+				require.Zero(t, callbackAPI.credentialReads)
+				for k := range a.kv {
+					require.False(t, strings.HasPrefix(k, credentialPrefix))
+				}
+			}
+			if mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" {
+				for _, u := range a.users {
+					c, err := newCredentialStore(p).Load(context.Background(), IdentityBinding{Issuer: issuer, Subject: "s", MattermostUserID: u.Id})
+					require.NoError(t, err)
+					require.Equal(t, "test-access", c.AccessToken)
+					require.Equal(t, "test-refresh", c.RefreshToken)
+					require.WithinDuration(t, time.Now().Add(600*time.Second), c.RefreshExpiresAt, 5*time.Second)
+					require.WithinDuration(t, time.Now().Add(300*time.Second), c.AccessExpiresAt, 5*time.Second)
+				}
+			}
+			if mode == "missing_refresh" {
+				for k, raw := range a.kv {
+					if strings.HasPrefix(k, credentialPrefix) {
+						var env credentialEnvelope
+						require.NoError(t, json.Unmarshal(raw, &env))
+						require.Equal(t, "invalidated", env.State)
+					}
+				}
+			}
+			if success {
+				require.Equal(t, 1, a.sessions)
+				require.Equal(t, 1, a.creates)
+				for _, u := range a.users {
+					if mode == "missing_username" && u.AuthService == "" {
+						require.Equal(t, "callback", u.Username)
+						continue
+					}
+					require.Equal(t, "oidc", u.AuthService)
+					require.Len(t, *u.AuthData, 67)
+					if mode == "missing_username" {
+						require.True(t, strings.HasPrefix(u.Username, "callback_"))
+					}
+				}
+				if mode != "popup" && mode != "mobile" {
+					require.Equal(t, 302, finish.Code)
+				} else {
+					require.Equal(t, 200, finish.Code)
+				}
+				if mode == "mobile" {
+					require.Contains(t, finish.Body.String(), "MMAUTHTOKEN")
+				}
+			} else {
+				if mode == "fence_failure" || mode == "authority_after_session" || mode == "authority_after_capture" || mode == "snapshot_after_capture" || mode == "native_changed" || mode == "wrong_session_user" || mode == "session_failure" {
+					require.Equal(t, 1, a.creates)
+				} else {
+					require.Zero(t, a.sessions+a.creates+a.updates)
+				}
+				for k := range a.kv {
+					if strings.HasPrefix(k, credentialPrefix) {
+						var env credentialEnvelope
+						require.NoError(t, json.Unmarshal(a.kv[k], &env))
+						require.Equal(t, "invalidated", env.State, "failed callback must leave no usable captured generation")
+					}
+				}
+				if mode == "secret_before" || mode == "missing_cookie" || mode == "epoch_before" {
+					require.Zero(t, exchanges)
+				}
+			}
+		})
+	}
+}
+
+// Core session operations are the external boundary. The identity registry,
+// signed OIDC exchange and encrypted KV implementation remain real in these tests.
+type credentialCallbackAPI struct {
+	*identityAPI
+	plugin            *Plugin
+	mode              string
+	credentialReads   int
+	revokedIDs        []string
+	sessionID         string
+	existingSessionID string
+	activeSessions    map[string]bool
+	sessionToken      string
+	sessionProps      model.StringMap
+	logs              strings.Builder
+}
+
+func (a *credentialCallbackAPI) CreateSession(s *model.Session) (*model.Session, *model.AppError) {
+	if a.mode == "session_failure" {
+		return nil, failAPI()
+	}
+	out, err := a.identityAPI.CreateSession(s)
+	out.Id = model.NewId()
+	a.sessionToken, a.sessionProps = out.Token, out.Props
+	a.sessionID = out.Id
+	a.activeSessions[out.Id] = true
+	if a.mode == "wrong_session_user" {
+		out.UserId = model.NewId()
+	}
+	if a.mode == "authority_after_session" {
+		_, _ = a.plugin.freezeIdentityGate()
+	}
+	if a.mode == "native_changed" {
+		a.users[s.UserId].AuthData = model.NewPointer("other")
+	}
+	return out, err
+}
+func (a *credentialCallbackAPI) RevokeSession(id string) *model.AppError {
+	a.revokedIDs = append(a.revokedIDs, id)
+	delete(a.activeSessions, id)
+	return nil
+}
+
+func (a *credentialCallbackAPI) LogWarn(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+func (a *credentialCallbackAPI) LogError(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+func (a *credentialCallbackAPI) LogInfo(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+func (a *credentialCallbackAPI) LogDebug(message string, fields ...any) {
+	a.logs.WriteString(message + fmt.Sprint(fields...))
+}
+
+func TestCredentialRefreshExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	for _, value := range []any{nil, 0, -1, "bad", "0", 0.1, float64(1e30), json.Number("1.2"), 315360001} {
+		token := (&oauth2.Token{}).WithExtra(map[string]any{"refresh_expires_in": value})
+		require.True(t, refreshExpiry(token, now).IsZero(), "invalid expiry must stay unknown")
+	}
+	for _, value := range []any{float64(600), json.Number("600"), "600", int64(600), int(600)} {
+		token := (&oauth2.Token{}).WithExtra(map[string]any{"refresh_expires_in": value})
+		require.Equal(t, time.Date(2026, 10, 26, 0, 10, 0, 0, time.UTC), refreshExpiry(token, now))
+	}
+}
+
+func (a *credentialCallbackAPI) KVGet(key string) ([]byte, *model.AppError) {
+	if strings.HasPrefix(key, credentialPrefix) {
+		a.credentialReads++
+		if a.mode == "persistence_disabled" {
+			return nil, failAPI()
+		}
+	}
+	return a.identityAPI.KVGet(key)
 }

@@ -29,6 +29,20 @@
                 "default": false
             },
             {
+                "key": "EnableTokenPersistence",
+                "display_name": "Retain Encrypted OIDC Credentials",
+                "type": "bool",
+                "help_text": "Capture encrypted credentials after a fresh verified login. Requires the external credential key ring. Disabling denies delegated use and skips capture; it does not revoke stored credentials. See docs/plane-broker-operations.md.",
+                "default": false
+            },
+            {
+                "key": "EnablePlaneBroker",
+                "display_name": "Enable Plane Delegated Access",
+                "type": "bool",
+                "help_text": "Enable the HMAC-authenticated fixed Plane token broker when encrypted persistence is also enabled. Requires external HMAC and credential key rings, an approved identity gate, and the mattermost-oidc client. Disabling stops issuance independently of ordinary login. See docs/plane-broker-operations.md.",
+                "default": false
+            },
+            {
                 "key": "IssuerURL",
                 "display_name": "Issuer URL",
                 "type": "text",
@@ -134,9 +148,9 @@
             },
             {
                 "key": "AutoLinkByEmail",
-                "display_name": "Auto-Link Existing Accounts by Email",
+                "display_name": "Auto-link by email (unsupported)",
                 "type": "bool",
-                "help_text": "When enabled, existing accounts will be automatically linked to OIDC on first login if the email matches. Warning: this will override any existing auth provider (LDAP, SAML, etc.) for matching accounts.",
+                "help_text": "Ignored. Identity ownership requires an approved issuer/subject binding. Email is profile data only.",
                 "default": false
             },
             {

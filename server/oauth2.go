@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -36,9 +37,12 @@ const (
 
 // OAuthState represents the state parameter stored in KV during the OAuth flow.
 type OAuthState struct {
-	Token    string `json:"token"`
-	CreateAt int64  `json:"create_at"`
-	ReturnTo string `json:"return_to"`
+	GateEpoch           uint64 `json:"gate_epoch"`
+	IdentityFingerprint string `json:"identity_fingerprint"`
+	CallbackFingerprint string `json:"callback_fingerprint"`
+	Token               string `json:"token"`
+	CreateAt            int64  `json:"create_at"`
+	ReturnTo            string `json:"return_to"`
 	// MobileRedirect, when set, is the native app's custom URL scheme callback
 	// (e.g. mmauth://callback). Its presence switches the callback into mobile
 	// mode: instead of setting a session cookie, the token is handed back to the
@@ -80,6 +84,7 @@ func isAllowedMobileScheme(redirect string) bool {
 
 // OIDCUserInfo holds the user information extracted from OIDC claims.
 type OIDCUserInfo struct {
+	Issuer        string `json:"iss"`
 	Subject       string `json:"sub"`
 	Email         string `json:"email"`
 	Username      string `json:"username"`
@@ -98,11 +103,12 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.retryOIDCProvider()
-	oauthConfig := p.getOAuthConfig()
-	if oauthConfig == nil {
-		http.Error(w, "OIDC provider not initialized. Check plugin configuration.", http.StatusInternalServerError)
+	snapshot, err := p.currentLoginSnapshot(r.Context())
+	if err != nil {
+		http.Error(w, "OIDC identity unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	oauthConfig := &snapshot.oauth
 
 	// Generate a secure state token
 	stateToken, err := generateRandomKey(16)
@@ -142,6 +148,7 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := OAuthState{
+		GateEpoch: snapshot.GateEpoch, IdentityFingerprint: snapshot.IdentityFingerprint, CallbackFingerprint: snapshot.CallbackFingerprint,
 		Token:          stateToken,
 		CreateAt:       time.Now().UnixMilli(),
 		ReturnTo:       returnTo,
@@ -196,8 +203,7 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Check for errors from the OIDC provider
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
-		errDesc := r.URL.Query().Get("error_description")
-		p.API.LogError("OIDC provider returned an error", "error", errParam, "description", errDesc)
+		p.API.LogError("OIDC provider rejected authentication")
 		p.renderError(w, "Authentication failed. Check the server logs for details.")
 		return
 	}
@@ -223,12 +229,12 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	deleted, delErr := p.API.KVCompareAndDelete(kvKey, stateBytes)
 	if delErr != nil {
-		p.API.LogError("Failed to consume OAuth state from KV", "key", kvKey, "error", delErr.Error())
+		p.API.LogError("Failed to consume OAuth state from KV", "error", delErr.Error())
 		p.renderError(w, "Internal error")
 		return
 	}
 	if !deleted {
-		p.API.LogWarn("OAuth state already consumed — possible replay attempt", "key", kvKey)
+		p.API.LogWarn("OAuth state already consumed — possible replay attempt")
 		p.renderError(w, "Authentication session expired. Please try again.")
 		return
 	}
@@ -269,19 +275,13 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oauthConfig := p.getOAuthConfig()
-	if oauthConfig == nil {
-		p.API.LogError("OIDC provider not initialized during callback")
-		p.renderError(w, "OIDC provider not initialized. Check plugin configuration.")
+	snapshot, snapshotErr := p.currentLoginSnapshot(r.Context())
+	if snapshotErr != nil || snapshot.GateEpoch != state.GateEpoch || snapshot.IdentityFingerprint != state.IdentityFingerprint || snapshot.CallbackFingerprint != state.CallbackFingerprint {
+		p.renderError(w, "Authentication configuration changed. Please try again.")
 		return
 	}
-
-	verifier := p.getOIDCVerifier()
-	if verifier == nil {
-		p.API.LogError("OIDC verifier not initialized during callback")
-		p.renderError(w, "OIDC provider not initialized. Check plugin configuration.")
-		return
-	}
+	config = &snapshot.configuration
+	oauthConfig, verifier := &snapshot.oauth, snapshot.verifier
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -292,8 +292,9 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, err := oauthConfig.Exchange(ctx, code, exchangeOpts...)
+	tokenReceivedAt := time.Now()
 	if err != nil {
-		p.API.LogError("Failed to exchange authorization code", "error", err.Error())
+		p.API.LogError("OIDC code exchange failed")
 		p.renderError(w, "Failed to complete authentication. Please try again.")
 		return
 	}
@@ -308,7 +309,7 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 
 	idToken, err := verifier.Verify(ctx, rawIDToken)
 	if err != nil {
-		p.API.LogError("Failed to verify ID token", "error", err.Error())
+		p.API.LogError("OIDC token verification failed")
 		p.renderError(w, "Authentication failed: invalid ID token")
 		return
 	}
@@ -320,35 +321,35 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract user claims
-	userInfo, err := p.extractUserInfo(ctx, idToken, token, config)
+	userInfo, err := p.extractUserInfo(ctx, idToken, token, snapshot)
 	if err != nil {
-		p.API.LogError("Failed to extract user info", "error", err.Error())
+		p.API.LogError("OIDC claim extraction failed")
 		p.renderError(w, "Failed to read user information from identity provider")
 		return
 	}
 
 	if config.RequireEmailVerified && (userInfo.EmailVerified == nil || !*userInfo.EmailVerified) {
-		p.API.LogWarn("Rejected OIDC login: email not verified by provider", "email", userInfo.Email, "subject", userInfo.Subject, "claim", config.EmailVerifiedClaim)
+		p.API.LogWarn("OIDC email verification required")
 		p.renderError(w, "Your email address is not verified by your identity provider.")
 		return
 	}
 
-	// Find or create the Mattermost user
-	mmUser, err := p.getOrCreateUser(userInfo, config)
+	if err := p.assertLoginSnapshot(ctx, snapshot); err != nil {
+		p.renderError(w, "Authentication configuration changed. Please try again.")
+		return
+	}
+	binding, mmUser, err := p.resolveVerifiedLogin(ctx, snapshot, VerifiedLoginIdentity{Issuer: idToken.Issuer, Subject: idToken.Subject}, userInfo)
 	if err != nil {
-		p.API.LogError("Failed to get or create user", "error", err.Error(), "email", userInfo.Email)
-		p.renderError(w, "Failed to create or update your account. Contact your administrator.")
+		p.renderError(w, "Identity unavailable. Contact your administrator.")
 		return
 	}
-
-	if mmUser.DeleteAt > 0 {
-		p.API.LogWarn("Deactivated user attempted OIDC login", "user_id", mmUser.Id, "email", userInfo.Email)
-		p.renderError(w, "Your account has been deactivated. Contact your administrator.")
+	if p.assertLoginSnapshot(ctx, snapshot) != nil || p.AssertCurrentBinding(ctx, binding) != nil {
+		p.renderError(w, "Identity unavailable. Contact your administrator.")
 		return
 	}
-	if mmUser.IsBot {
-		p.API.LogWarn("Bot account attempted OIDC login", "user_id", mmUser.Id, "email", userInfo.Email)
-		p.renderError(w, "Bot accounts cannot log in via OIDC.")
+	mmUser, err = p.updateUserIfChanged(mmUser, userInfo)
+	if err != nil {
+		p.renderError(w, "Unable to update account.")
 		return
 	}
 
@@ -381,6 +382,10 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// IsOAuth=true makes logout's RevokeSession → RevokeAccessToken fail with
 	// "could not get token" (HTTP 500). Core SSO logins also use IsOAuth=false and
 	// flag OAuth via the isOAuthUser session prop instead.
+	if p.assertLoginSnapshot(ctx, snapshot) != nil || p.AssertCurrentBinding(ctx, binding) != nil {
+		p.renderError(w, "Identity unavailable. Contact your administrator.")
+		return
+	}
 	session, appErr := p.API.CreateSession(&model.Session{
 		UserId:        mmUser.Id,
 		Roles:         mmUser.GetRawRoles(),
@@ -398,6 +403,22 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	if appErr != nil {
 		p.API.LogError("Failed to create session", "error", appErr.Error(), "user_id", mmUser.Id)
 		p.renderError(w, "Failed to create session. Please try again.")
+		return
+	}
+
+	// Only a verified callback with a successful native session can capture.
+	// Missing keys/optional storage failures after a durable fence preserve login.
+	// Authority or initial-fence failures revoke only this callback's new session.
+	if session.UserId != binding.Binding.MattermostUserID || mmUser.Id != binding.Binding.MattermostUserID {
+		err = ErrIdentityConflict
+	} else {
+		err = p.captureLoginCredentials(ctx, snapshot, binding, token, tokenReceivedAt)
+	}
+	if err != nil {
+		if revokeErr := p.API.RevokeSession(session.Id); revokeErr != nil {
+			p.API.LogError("Failed to revoke unreleased OIDC session")
+		}
+		p.renderError(w, "Identity unavailable. Please try again.")
 		return
 	}
 
@@ -429,6 +450,67 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, siteURL+returnTo, http.StatusFound)
+}
+
+func (p *Plugin) captureLoginCredentials(ctx context.Context, snapshot *LoginSnapshot, binding ResolvedIdentity, token *oauth2.Token, receivedAt time.Time) error {
+	if err := p.assertLoginSnapshot(ctx, snapshot); err != nil {
+		return err
+	}
+	if err := p.AssertCurrentBinding(ctx, binding); err != nil {
+		return err
+	}
+	store := newCredentialStore(p)
+	var publication *credentialPublication
+	if p.getConfiguration().EnableTokenPersistence {
+		credentials := StoredCredentials{
+			Binding: binding.Binding, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken,
+			AccessExpiresAt: token.Expiry, RefreshExpiresAt: refreshExpiry(token, receivedAt),
+			GateEpoch: binding.GateEpoch, BindingRevision: binding.BindingRevision,
+		}
+		var err error
+		publication, err = store.save(ctx, credentials)
+		if err != nil {
+			if !errors.Is(err, ErrCredentialsUnavailable) {
+				return err
+			}
+			p.API.LogWarn("OIDC login completed without delegated credentials")
+		}
+	}
+	err := p.assertLoginSnapshot(ctx, snapshot)
+	if err == nil {
+		err = p.AssertCurrentBinding(ctx, binding)
+	}
+	if err != nil && publication != nil {
+		if cleanupErr := store.abandonPublication(ctx, binding.Binding, publication.envelope, publication.ready); cleanupErr != nil {
+			return cleanupErr
+		}
+	}
+	return err
+}
+
+// refresh_expires_in is provider-specific, not an OIDC guarantee. Missing, zero,
+// invalid or unbounded values remain unknown, never an invented infinite expiry.
+func refreshExpiry(token *oauth2.Token, now time.Time) time.Time {
+	var seconds int64
+	switch v := token.Extra("refresh_expires_in").(type) {
+	case float64:
+		if v <= 0 || v > 315360000 || v != float64(int64(v)) {
+			return time.Time{}
+		}
+		seconds = int64(v)
+	case json.Number:
+		seconds, _ = v.Int64()
+	case string:
+		seconds, _ = strconv.ParseInt(v, 10, 64)
+	case int64:
+		seconds = v
+	case int:
+		seconds = int64(v)
+	}
+	if seconds <= 0 || seconds > 315360000 {
+		return time.Time{}
+	}
+	return now.Add(time.Duration(seconds) * time.Second)
 }
 
 // renderPopupAuthComplete renders the HTML page shown in the popup window after a
@@ -538,18 +620,22 @@ func (p *Plugin) renderMobileAuthComplete(w http.ResponseWriter, redirectTo, tok
 }
 
 // extractUserInfo parses the OIDC claims into an OIDCUserInfo struct.
-func (p *Plugin) extractUserInfo(ctx context.Context, idToken *oidc.IDToken, oauthToken *oauth2.Token, config *Configuration) (*OIDCUserInfo, error) {
+func (p *Plugin) extractUserInfo(ctx context.Context, idToken *oidc.IDToken, oauthToken *oauth2.Token, snapshot *LoginSnapshot) (*OIDCUserInfo, error) {
+	config := &snapshot.configuration
 	var claims map[string]interface{}
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("failed to parse ID token claims: %w", err)
 	}
 
 	// Also try to get claims from userinfo endpoint for additional data
-	provider := p.getOIDCProvider()
+	provider := snapshot.provider
 	if provider != nil && oauthToken != nil && oauthToken.AccessToken != "" {
 		tokenSource := oauth2.StaticTokenSource(oauthToken)
 		userInfoResp, err := provider.UserInfo(ctx, tokenSource)
 		if err == nil {
+			if userInfoResp.Subject != idToken.Subject {
+				return nil, ErrIdentityConflict
+			}
 			var uiClaims map[string]interface{}
 			if err := userInfoResp.Claims(&uiClaims); err == nil {
 				// Merge userinfo claims into ID token claims (ID token takes priority)
@@ -570,6 +656,7 @@ func (p *Plugin) extractUserInfo(ctx context.Context, idToken *oidc.IDToken, oau
 
 	info := &OIDCUserInfo{
 		Subject:       idToken.Subject,
+		Issuer:        idToken.Issuer,
 		Email:         getStringClaim(claims, config.EmailClaim),
 		Username:      getStringClaim(claims, config.UsernameClaim),
 		FirstName:     getStringClaim(claims, config.FirstNameClaim),
@@ -603,101 +690,6 @@ func (p *Plugin) extractUserInfo(ctx context.Context, idToken *oidc.IDToken, oau
 
 // KVOIDCUserPrefix is the KV store key prefix for mapping OIDC subjects to Mattermost user IDs.
 const KVOIDCUserPrefix = "oidc_user_"
-
-// getOrCreateUser finds an existing user by OIDC subject (via KV mapping) or email, or creates a new one.
-func (p *Plugin) getOrCreateUser(userInfo *OIDCUserInfo, config *Configuration) (*model.User, error) {
-	// First, try to find user by OIDC subject via KV mapping
-	kvKey := KVOIDCUserPrefix + userInfo.Subject
-	if userIDBytes, appErr := p.API.KVGet(kvKey); appErr == nil && userIDBytes != nil {
-		userID := string(userIDBytes)
-		user, getErr := p.API.GetUser(userID)
-		if getErr == nil && user != nil {
-			return p.updateUserIfChanged(user, userInfo)
-		}
-		// User was deleted — clean up stale mapping
-		if delErr := p.API.KVDelete(kvKey); delErr != nil {
-			p.API.LogWarn("Failed to delete stale OIDC user mapping", "key", kvKey, "error", delErr.Error())
-		}
-	}
-
-	// Try to find by email and optionally link to OIDC
-	user, appErr := p.API.GetUserByEmail(userInfo.Email)
-	if appErr == nil && user != nil {
-		if !config.AutoLinkByEmail {
-			return nil, fmt.Errorf("user with email %s exists but auto-linking is disabled", userInfo.Email)
-		}
-		p.API.LogInfo("Linking existing user to OIDC", "user_id", user.Id, "email", userInfo.Email)
-		_, updateErr := p.API.UpdateUserAuth(user.Id, &model.UserAuth{
-			AuthService: AuthService,
-			AuthData:    model.NewPointer(userInfo.Subject),
-		})
-		if updateErr != nil {
-			return nil, fmt.Errorf("failed to link user to OIDC: %s", updateErr.Error())
-		}
-		// Store OIDC subject → user ID mapping
-		if setErr := p.API.KVSet(kvKey, []byte(user.Id)); setErr != nil {
-			p.API.LogWarn("Failed to store OIDC user mapping", "key", kvKey, "error", setErr.Error())
-		}
-		return p.updateUserIfChanged(user, userInfo)
-	}
-
-	// User doesn't exist — create if enabled
-	if !config.AutoCreateAccounts {
-		return nil, fmt.Errorf("user with email %s not found and auto-creation is disabled", userInfo.Email)
-	}
-
-	newUser := &model.User{
-		Email:         userInfo.Email,
-		Username:      userInfo.Username,
-		FirstName:     userInfo.FirstName,
-		LastName:      userInfo.LastName,
-		Position:      userInfo.Position,
-		AuthService:   AuthService,
-		AuthData:      model.NewPointer(userInfo.Subject),
-		EmailVerified: userInfo.EmailVerified == nil || *userInfo.EmailVerified,
-	}
-
-	createdUser, appErr := p.API.CreateUser(newUser)
-	if appErr != nil {
-		// Username conflict? Try appending a random suffix.
-		if strings.Contains(appErr.Message, "username") || appErr.Id == "app.user.save.username_exists.app_error" {
-			suffix, _ := generateRandomKey(3)
-			newUser.Username = newUser.Username + "_" + suffix
-			createdUser, appErr = p.API.CreateUser(newUser)
-			if appErr != nil {
-				return nil, fmt.Errorf("failed to create user (with suffix): %s", appErr.Error())
-			}
-		} else {
-			return nil, fmt.Errorf("failed to create user: %s", appErr.Error())
-		}
-	}
-
-	p.API.LogInfo("Created new user via OIDC", "user_id", createdUser.Id, "email", createdUser.Email)
-
-	// Store OIDC subject → user ID mapping
-	if setErr := p.API.KVSet(kvKey, []byte(createdUser.Id)); setErr != nil {
-		p.API.LogWarn("Failed to store OIDC user mapping for new user", "key", kvKey, "error", setErr.Error())
-	}
-
-	// Auto-join the default team if configured
-	if config.DefaultTeam != "" {
-		team, teamErr := p.API.GetTeamByName(config.DefaultTeam)
-		if teamErr == nil && team != nil {
-			_, memberErr := p.API.CreateTeamMember(team.Id, createdUser.Id)
-			if memberErr != nil {
-				p.API.LogWarn("Failed to add user to default team",
-					"user_id", createdUser.Id,
-					"team", config.DefaultTeam,
-					"error", memberErr.Error(),
-				)
-			}
-		} else {
-			p.API.LogWarn("Default team not found", "team", config.DefaultTeam)
-		}
-	}
-
-	return createdUser, nil
-}
 
 // updateUserIfChanged updates the Mattermost user profile if OIDC claims have changed.
 func (p *Plugin) updateUserIfChanged(user *model.User, info *OIDCUserInfo) (*model.User, error) {

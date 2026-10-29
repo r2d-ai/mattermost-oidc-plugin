@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +15,7 @@ import (
 
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/mux"
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"golang.org/x/oauth2"
 )
@@ -41,7 +45,13 @@ type Plugin struct {
 	configurationLock sync.RWMutex
 
 	// configuration is the active plugin configuration.
-	configuration *Configuration
+	configuration         *Configuration
+	configurationRevision uint64
+	// discoveryAttempt orders every discovery entry point, including overlapping
+	// lifecycle and login-retry calls with the same configuration revision.
+	discoveryAttempt uint64
+	loginSnapshot    *LoginSnapshot
+	readApprovalFile func() ([]byte, error)
 
 	// encryptionKey is the HMAC key used to sign OAuth state tokens.
 	// Loaded from the KV store on activation; never exposed via config or UI.
@@ -67,30 +77,22 @@ type Plugin struct {
 
 	// router handles HTTP requests for this plugin.
 	router *mux.Router
+	broker brokerLimits
 }
 
 // OnActivate is called when the plugin is activated.
 func (p *Plugin) OnActivate() error {
-	// Load or generate the HMAC signing key from the KV store.
-	// The key is kept out of plugin config and the System Console entirely.
-	if keyBytes, err := p.API.KVGet(kvEncryptionKey); err != nil {
-		return fmt.Errorf("failed to load encryption key from KV store: %w", err)
-	} else if len(keyBytes) > 0 {
-		p.encryptionKey = string(keyBytes)
-	} else {
-		key, err := generateRandomKey(32)
-		if err != nil {
-			return fmt.Errorf("failed to generate encryption key: %w", err)
-		}
-		if err := p.API.KVSet(kvEncryptionKey, []byte(key)); err != nil {
-			return fmt.Errorf("failed to persist encryption key: %w", err)
-		}
-		p.encryptionKey = key
+	if err := p.initializeStateKey(); err != nil {
+		return err
 	}
 
 	p.initRouter()
+	if err := p.registerIdentityCommand(); err != nil {
+		return err
+	}
 
 	cfg := p.getConfiguration()
+	_, _ = p.observeIdentityGate(cfg)
 	if cfg.Enable {
 		if err := cfg.IsValid(); err != nil {
 			p.API.LogWarn("OIDC plugin configuration is incomplete", "error", err.Error())
@@ -123,15 +125,21 @@ func (p *Plugin) OnConfigurationChange() error {
 
 	p.configurationLock.RLock()
 	var (
-		unchanged   = p.configuration != nil && *p.configuration == configuration
-		hasProvider = p.oauth2Config != nil
+		unchanged        = p.configuration != nil && *p.configuration == configuration
+		onlyCaptureFlags = p.configuration != nil && sameLoginConfiguration(p.configuration, &configuration)
+		hasProvider      = p.oauth2Config != nil
 	)
 	p.configurationLock.RUnlock()
 	if unchanged && hasProvider {
 		return nil // if settings did not change and the provider is already running, skip re-discovery.
 	}
+	if onlyCaptureFlags && hasProvider {
+		p.setConfiguration(&configuration)
+		return nil
+	}
 
 	p.setConfiguration(&configuration)
+	_, _ = p.observeIdentityGate(&configuration)
 	p.clearOIDCProvider() // clear old config to prevent stale, outdated config in case the newly saved one is invalid
 
 	if configuration.Enable {
@@ -163,7 +171,22 @@ func (p *Plugin) setConfiguration(configuration *Configuration) {
 	p.configurationLock.Lock()
 	defer p.configurationLock.Unlock()
 
-	p.configuration = configuration
+	// Capture switches are live policy, not part of the verified login snapshot.
+	// Preserve B0's full equality check for every other configuration field.
+	if p.configuration != nil && p.loginSnapshot != nil && sameLoginConfiguration(p.configuration, configuration) {
+		snapshot := *p.loginSnapshot
+		snapshot.configuration = *configuration.Clone()
+		p.loginSnapshot = &snapshot
+	}
+	p.configuration = configuration.Clone()
+	p.configurationRevision++
+}
+
+func sameLoginConfiguration(a, b *Configuration) bool {
+	left, right := *a, *b
+	left.EnableTokenPersistence, right.EnableTokenPersistence = false, false
+	left.EnablePlaneBroker, right.EnablePlaneBroker = false, false
+	return left == right
 }
 
 // clearOIDCProvider resets the cached provider, OAuth2 configuration, and verifier.
@@ -171,6 +194,7 @@ func (p *Plugin) clearOIDCProvider() {
 	p.configurationLock.Lock()
 	defer p.configurationLock.Unlock()
 
+	p.loginSnapshot = nil
 	p.oidcProvider = nil
 	p.oauth2Config = nil
 	p.oidcVerifier = nil
@@ -178,7 +202,16 @@ func (p *Plugin) clearOIDCProvider() {
 
 // initOIDCProvider discovers and initializes the OIDC provider, OAuth2 config, and verifier.
 func (p *Plugin) initOIDCProvider() error {
-	config := p.getConfiguration()
+	p.configurationLock.Lock()
+	config := p.configuration.Clone()
+	revision := p.configurationRevision
+	key := p.encryptionKey
+	p.discoveryAttempt++
+	attempt := p.discoveryAttempt
+	p.configurationLock.Unlock()
+	if key == "" {
+		return nil
+	} // OnConfigurationChange may precede activation.
 	if err := config.IsValid(); err != nil {
 		return err
 	}
@@ -222,16 +255,18 @@ func (p *Plugin) initOIDCProvider() error {
 	})
 
 	p.configurationLock.Lock()
-	// A configuration saved during discovery gets its own OnConfigurationChange, so this result is stale.
-	stale := p.configuration == nil || *p.configuration != *config
+	// A newer discovery attempt fences this result even at the same configuration
+	// revision. Slow lifecycle discovery must not overwrite a newer login retry.
+	stale := p.discoveryAttempt != attempt || p.configuration == nil || p.configurationRevision != revision || p.encryptionKey != key || *p.configuration != *config
 	if !stale {
 		p.oidcProvider = provider
 		p.oauth2Config = oauthConfig
 		p.oidcVerifier = verifier
+		p.loginSnapshot = makeLoginSnapshot(config, provider, verifier, oauthConfig, key)
 	}
 	p.configurationLock.Unlock()
 	if stale {
-		return fmt.Errorf("configuration changed during discovery")
+		return ErrCallbackConfigurationChanged
 	}
 
 	p.API.LogInfo("OIDC provider initialized successfully",
@@ -259,6 +294,23 @@ func (p *Plugin) retryOIDCProvider() {
 
 // ServeHTTP routes incoming HTTP requests to the plugin's router.
 func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == brokerLocalPath {
+		p.handlePlaneBroker(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/internal/") {
+		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Path == "/api/v1/plane/disconnect" || r.URL.Path == "/api/v1/plane/revoke" {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		p.handleCredentialManagement(c, w, r, r.URL.Path == "/api/v1/plane/revoke")
+		return
+	}
 	p.router.ServeHTTP(w, r)
 }
 
@@ -318,4 +370,79 @@ func (p *Plugin) getOIDCProvider() *oidc.Provider {
 	p.configurationLock.RLock()
 	defer p.configurationLock.RUnlock()
 	return p.oidcProvider
+}
+
+// Only management routes require this ordinary session + explicit CSRF guard.
+// The Context/header pair is trusted only behind Mattermost's plugin dispatcher.
+func (p *Plugin) managementActor(c *plugin.Context, r *http.Request) (*model.User, error) {
+	id := r.Header.Get("Mattermost-User-Id")
+	if c == nil || !model.IsValidId(c.SessionId) || !model.IsValidId(id) {
+		return nil, ErrIdentityMismatch
+	}
+	session, ae := p.API.GetSession(c.SessionId)
+	if ae != nil || session == nil || session.Id != c.SessionId || session.UserId != id || session.IsExpired() || session.IsIntegration() {
+		return nil, ErrIdentityMismatch
+	}
+	csrf := r.Header.Get(model.HeaderCsrfToken)
+	if csrf == "" || session.GetCSRF() == "" || subtle.ConstantTimeCompare([]byte(csrf), []byte(session.GetCSRF())) != 1 {
+		return nil, ErrIdentityMismatch
+	}
+	user, ae := p.API.GetUser(id)
+	if ae != nil || user == nil || user.Id != id || user.DeleteAt != 0 || user.IsBot {
+		return nil, ErrIdentityMismatch
+	}
+	return user, nil
+}
+func (p *Plugin) handleCredentialManagement(c *plugin.Context, w http.ResponseWriter, r *http.Request, admin bool) {
+	actor, e := p.managementActor(c, r)
+	if e != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := actor.Id
+	if admin {
+		// Roles come from a fresh server GetUser, never from session/request claims.
+		if !actor.IsSystemAdmin() {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var target struct {
+			UserID string `json:"user_id"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&target) != nil || decoder.Decode(new(any)) != io.EOF || !model.IsValidId(target.UserID) {
+			http.Error(w, "invalid target", http.StatusBadRequest)
+			return
+		}
+		id = target.UserID
+	}
+	b, e := p.cleanupBinding(id)
+	if e != nil {
+		http.Error(w, "identity unavailable", http.StatusConflict)
+		return
+	}
+	if e = newTokenLifecycle(p).Disconnect(r.Context(), b); e != nil {
+		http.Error(w, "credential invalidation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Core invokes this asynchronously and does not guarantee durable delivery.
+// Broker use must independently reread the user even after successful cleanup.
+func (p *Plugin) UserHasBeenDeactivated(_ *plugin.Context, user *model.User) {
+	if user == nil {
+		return
+	}
+	b, e := p.cleanupBinding(user.Id)
+	if e != nil {
+		p.API.LogWarn("Delegated credential deactivation binding unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), refreshBudget)
+	defer cancel()
+	if e = newCredentialStore(p).Invalidate(ctx, b); e != nil {
+		p.API.LogWarn("Delegated credential deactivation invalidation unavailable")
+	}
 }

@@ -1,0 +1,613 @@
+{
+  "stage": "B3 isolated deployed evidence; final independent evidence gate pending",
+  "approved_code_commit": "cfbd7101030fef1dd99661f6c8ea5f9e512920c2",
+  "installed_archive_sha256": "58d75a366b1bedb58ab00ea684cb78b7941cbcdf8a4a2531724b201235f7a2fe",
+  "installed_binary_vcs_modified": false,
+  "events": [
+    {
+      "at": "2026-10-26T03:00:30.334Z",
+      "name": "live-initial-inspection",
+      "admin_status": 200,
+      "affected_session_counts": [
+        0,
+        0
+      ],
+      "gate_status": "outcome=ok gate=frozen epoch=7 approval_digest= rows=0 conflicts=0",
+      "login_enabled": false,
+      "broker_enabled": false,
+      "persistence_enabled": false,
+      "active_plugins": [
+        {
+          "id": "mattermost-oidc",
+          "version": "0.6.2"
+        }
+      ],
+      "inactive_plugins": []
+    },
+    {
+      "at": "2026-10-26T03:02:57.581Z",
+      "name": "actual-private-config-check",
+      "client_secret_empty": true,
+      "api_secret_mask_not_used_as_value": true
+    },
+    {
+      "at": "2026-10-26T03:03:01.894Z",
+      "name": "reviewed-bundle-uploaded-and-environment-prepared",
+      "upload_status": 201,
+      "enable_status": 200,
+      "code_revision": "cfbd7101030fef1dd99661f6c8ea5f9e512920c2",
+      "vcs_modified": false,
+      "archive_sha256": "58d75a366b1bedb58ab00ea684cb78b7941cbcdf8a4a2531724b201235f7a2fe",
+      "external_key_file_mode": "0600",
+      "flags_disabled": true
+    },
+    {
+      "at": "2026-10-26T03:03:02.709Z",
+      "name": "mattermost-process-replaced",
+      "only_service": "mattermost",
+      "database_preserved": true
+    },
+    {
+      "at": "2026-10-26T03:04:02.149Z",
+      "name": "cycle1-maintenance-before-receipt",
+      "sole_node_replaced_with_login_off": true,
+      "gate": "frozen",
+      "epoch": 7,
+      "affected_users": 2,
+      "targeted_revocations": [
+        {
+          "status": 200,
+          "remaining": 0
+        },
+        {
+          "status": 200,
+          "remaining": 0
+        }
+      ],
+      "native_admin_status": 200,
+      "current_old_token_available": false,
+      "old_token_401_source": "historical B0 only; no current old-token claim"
+    },
+    {
+      "at": "2026-10-26T03:04:02.682Z",
+      "name": "cycle1-approved-activation",
+      "retained_rows": 2,
+      "gate": "active",
+      "epoch": 8,
+      "exact_receipt_digest": "c4798a9755a035627893c9d0844ad926cafe7c84dadcee4fc487f3fea818e76f",
+      "map_bytes_unchanged": true,
+      "connect_status": 302,
+      "broker_and_capture_enabled": true
+    },
+    {
+      "at": "2026-10-26T03:05:01.951Z",
+      "name": "fresh-callback-alice",
+      "native_session_status": 200,
+      "committed_issuer_binding": true,
+      "same_expected_uuid": "historical UUID preserved",
+      "credential_state": "ready",
+      "credential_generation": 1,
+      "ciphertext_present": true,
+      "raw_token_fields_absent": true,
+      "effective_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:05:02.899Z",
+      "name": "fresh-callback-bob",
+      "native_session_status": 200,
+      "committed_issuer_binding": true,
+      "same_expected_uuid": "first B3 callback establishes UUID",
+      "credential_state": "ready",
+      "credential_generation": 1,
+      "ciphertext_present": true,
+      "raw_token_fields_absent": true,
+      "effective_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:07:01.823Z",
+      "name": "signed-public-alice",
+      "status": 200,
+      "scope": "plane.read",
+      "signature_valid": true,
+      "own_stored_subject": true,
+      "audience_exact": true,
+      "scope_exact": true,
+      "lifetime_seconds": 180,
+      "expiry_from_claims": true,
+      "response_fields": 2,
+      "effective_HMAC_and_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:07:01.839Z",
+      "name": "immediate-identical-public-replay",
+      "status": 401,
+      "timestamp_still_valid": true
+    },
+    {
+      "at": "2026-10-26T03:07:01.933Z",
+      "name": "signed-public-alice",
+      "status": 200,
+      "scope": "plane.read plane.write",
+      "signature_valid": true,
+      "own_stored_subject": true,
+      "audience_exact": true,
+      "scope_exact": true,
+      "lifetime_seconds": 180,
+      "expiry_from_claims": true,
+      "response_fields": 2,
+      "effective_HMAC_and_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:07:02.031Z",
+      "name": "signed-public-bob",
+      "status": 200,
+      "scope": "plane.read",
+      "signature_valid": true,
+      "own_stored_subject": true,
+      "audience_exact": true,
+      "scope_exact": true,
+      "lifetime_seconds": 180,
+      "expiry_from_claims": true,
+      "response_fields": 2,
+      "effective_HMAC_and_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:07:02.122Z",
+      "name": "signed-public-bob",
+      "status": 200,
+      "scope": "plane.read plane.write",
+      "signature_valid": true,
+      "own_stored_subject": true,
+      "audience_exact": true,
+      "scope_exact": true,
+      "lifetime_seconds": 180,
+      "expiry_from_claims": true,
+      "response_fields": 2,
+      "effective_HMAC_and_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:07:02.136Z",
+      "name": "public-negative-unsigned",
+      "status": 401,
+      "no_token_returned": true,
+      "no_store": true
+    },
+    {
+      "at": "2026-10-26T03:07:02.149Z",
+      "name": "public-negative-forged-user",
+      "status": 401,
+      "no_token_returned": true,
+      "no_store": true
+    },
+    {
+      "at": "2026-10-26T03:07:02.161Z",
+      "name": "public-negative-body",
+      "status": 401,
+      "no_token_returned": true,
+      "no_store": true
+    },
+    {
+      "at": "2026-10-26T03:07:02.170Z",
+      "name": "public-negative-method",
+      "status": 400,
+      "no_token_returned": true,
+      "no_store": true
+    },
+    {
+      "at": "2026-10-26T03:07:02.181Z",
+      "name": "public-negative-query",
+      "status": 400,
+      "no_token_returned": true,
+      "no_store": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.283Z",
+      "name": "raw-public-bare-query",
+      "actual_status": 400,
+      "expected_status": 400,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.291Z",
+      "name": "raw-public-escaped-path",
+      "actual_status": 400,
+      "expected_status": 400,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.301Z",
+      "name": "raw-public-duplicate-header",
+      "actual_status": 401,
+      "expected_status": 401,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.312Z",
+      "name": "raw-public-signed-wrong-path",
+      "actual_status": 401,
+      "expected_status": 401,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.322Z",
+      "name": "raw-public-unknown-key",
+      "actual_status": 401,
+      "expected_status": 401,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.331Z",
+      "name": "raw-public-stale31",
+      "actual_status": 401,
+      "expected_status": 401,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.340Z",
+      "name": "raw-public-future31",
+      "actual_status": 401,
+      "expected_status": 401,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.356Z",
+      "name": "raw-public-unknown-json",
+      "actual_status": 400,
+      "expected_status": 400,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:08:06.372Z",
+      "name": "raw-public-unsupported-scope",
+      "actual_status": 403,
+      "expected_status": 403,
+      "wire_path_explicit": true,
+      "no_access_token": true
+    },
+    {
+      "at": "2026-10-26T03:11:27.427Z",
+      "name": "actual-installed-binary-association",
+      "matches_clean_reviewed_local_binary": true,
+      "vcs_revision": "cfbd7101030fef1dd99661f6c8ea5f9e512920c2",
+      "vcs_modified": false,
+      "archive_sha256": "58d75a366b1bedb58ab00ea684cb78b7941cbcdf8a4a2531724b201235f7a2fe",
+      "backup_mode": "0600",
+      "backup_type": "actual plugin KV export; includes OAuth state key and private identity rows"
+    },
+    {
+      "name": "private-KV-backup-inspection",
+      "credential_checks": [
+        {
+          "user": "alice",
+          "authenticated_decryption": true,
+          "actual_access_and_refresh_present_in_memory": true,
+          "raw_and_base64_tokens_absent_from_decoded_backup": true,
+          "id_token_field_absent": true,
+          "generation": 1
+        },
+        {
+          "user": "bob",
+          "authenticated_decryption": true,
+          "actual_access_and_refresh_present_in_memory": true,
+          "raw_and_base64_tokens_absent_from_decoded_backup": true,
+          "id_token_field_absent": true,
+          "generation": 1
+        }
+      ],
+      "integration_AES_HMAC_key_representations_absent": true,
+      "existing_oauth_state_key_present": true,
+      "backup_mode": "0600",
+      "no_plaintext_or_key_material_emitted": true
+    },
+    {
+      "at": "2026-10-26T03:11:41.928Z",
+      "name": "temporary-trusted-caller-installed",
+      "active_plugin_ids": [
+        "mattermost-oidc",
+        "mattermost-plugin-plane"
+      ],
+      "caller_archive_sha256": "97184da0dba510960f104c837de28b07c4ae48766545b0097f5625d9c78d6c26",
+      "caller_has_no_public_token_route": true,
+      "environment_shared_with_trusted_plugins": true
+    },
+    {
+      "at": "2026-10-26T03:11:42.357Z",
+      "name": "actual-PluginHTTP-alice",
+      "cases": [
+        {
+          "exact_two_response_fields": true,
+          "replay_status": 401,
+          "scope": "plane.read",
+          "signed_claims_valid": true,
+          "signed_status": 200,
+          "unsigned_status": 401
+        },
+        {
+          "exact_two_response_fields": true,
+          "replay_status": 401,
+          "scope": "plane.read plane.write",
+          "signed_claims_valid": true,
+          "signed_status": 200,
+          "unsigned_status": 401
+        }
+      ],
+      "plugin_http": true,
+      "synthetic_caller": true
+    },
+    {
+      "at": "2026-10-26T03:11:42.639Z",
+      "name": "actual-PluginHTTP-bob",
+      "cases": [
+        {
+          "exact_two_response_fields": true,
+          "replay_status": 401,
+          "scope": "plane.read",
+          "signed_claims_valid": true,
+          "signed_status": 200,
+          "unsigned_status": 401
+        },
+        {
+          "exact_two_response_fields": true,
+          "replay_status": 401,
+          "scope": "plane.read plane.write",
+          "signed_claims_valid": true,
+          "signed_status": 200,
+          "unsigned_status": 401
+        }
+      ],
+      "plugin_http": true,
+      "synthetic_caller": true
+    },
+    {
+      "at": "2026-10-26T03:13:06.297Z",
+      "name": "actual-process-restart-replay-proof",
+      "pre_restart_committed_status": 200,
+      "process_start_changed": true,
+      "seconds_since_original_timestamp": 24,
+      "replay_kind": "byte-exact replay within timestamp window",
+      "replay_status": 401,
+      "fresh_nonce_same_key_positive_control": 200,
+      "native_admin_status": 200,
+      "database_and_KV_preserved": true,
+      "multi_node_runtime_claim": false
+    },
+    {
+      "at": "2026-10-26T03:14:59.162Z",
+      "name": "cycle2-premaintenance-disconnect-alice",
+      "status": 204,
+      "real_native_session_and_csrf": true
+    },
+    {
+      "at": "2026-10-26T03:15:11.450Z",
+      "name": "cycle2-premaintenance-disconnect-alice",
+      "status": 204,
+      "real_native_session_and_csrf": true
+    },
+    {
+      "at": "2026-10-26T03:15:11.581Z",
+      "name": "cycle2-premaintenance-disconnect-bob",
+      "status": 204,
+      "real_native_session_and_csrf": true
+    },
+    {
+      "at": "2026-10-26T03:15:12.261Z",
+      "name": "cycle2-current-maintenance-before-receipt",
+      "gate": "frozen",
+      "epoch": 9,
+      "login_and_capture_and_broker_disabled": true,
+      "sole_node_completed_callbacks_drained": true,
+      "targeted_affected_users": 3,
+      "revocations": [
+        {
+          "status": 200,
+          "remaining": 0
+        },
+        {
+          "status": 200,
+          "remaining": 0
+        },
+        {
+          "status": 200,
+          "remaining": 0
+        }
+      ],
+      "actual_old_callback_sessions": {
+        "alice": 401,
+        "bob": 401
+      },
+      "native_admin_status": 200,
+      "private_original_tokens_retained_for_proof": true
+    },
+    {
+      "at": "2026-10-26T03:15:12.730Z",
+      "name": "cycle2-reactivated-after-current-session-proof",
+      "retained_rows": 3,
+      "exact_receipt_digest": "2f6954182ac82c4a65953367febfecdb179f5042657195cd84a4273be8ef5956",
+      "gate": "active",
+      "epoch": 10,
+      "map_bytes_unchanged": true
+    },
+    {
+      "at": "2026-10-26T03:17:36.722Z",
+      "name": "fresh-callback-alice",
+      "native_session_status": 200,
+      "committed_issuer_binding": true,
+      "same_expected_uuid": "historical UUID preserved",
+      "credential_state": "ready",
+      "credential_generation": 5,
+      "ciphertext_present": true,
+      "raw_token_fields_absent": true,
+      "effective_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:17:37.507Z",
+      "name": "fresh-callback-bob",
+      "native_session_status": 200,
+      "committed_issuer_binding": true,
+      "same_expected_uuid": "previous real callback UUID preserved",
+      "credential_state": "ready",
+      "credential_generation": 4,
+      "ciphertext_present": true,
+      "raw_token_fields_absent": true,
+      "effective_AES_environment_inheritance": true
+    },
+    {
+      "at": "2026-10-26T03:18:37.632Z",
+      "name": "broker-kill-switch-after-warm-use",
+      "warm_status": 200,
+      "disabled_status": 503,
+      "login_enabled": true,
+      "persistence_enabled": true
+    },
+    {
+      "at": "2026-10-26T03:18:39.259Z",
+      "name": "broker-off-fresh-complete-callback",
+      "user": "alice",
+      "complete_callback_status": 200,
+      "same_native_uuid": true,
+      "credential_state": "ready",
+      "generation_before": 5,
+      "generation_after": 6,
+      "capture_behavior": "capture"
+    },
+    {
+      "at": "2026-10-26T03:18:40.603Z",
+      "name": "capture-off-fresh-complete-callback",
+      "user": "bob",
+      "complete_callback_status": 200,
+      "same_native_uuid": true,
+      "credential_state": "ready",
+      "generation_before": 4,
+      "generation_after": 4,
+      "capture_behavior": "skip"
+    },
+    {
+      "at": "2026-10-26T03:18:40.646Z",
+      "name": "independent-switches-confirmed",
+      "broker_disabled_through_callbacks": true,
+      "login_successful_with_broker_off": true,
+      "capture_skipped_when_persistence_off": true,
+      "native_admin_status": 200
+    },
+    {
+      "at": "2026-10-26T03:18:41.068Z",
+      "name": "before-keyloss-targeted-disconnect",
+      "users": 2,
+      "status": 204,
+      "native_sessions_preserved": true
+    },
+    {
+      "at": "2026-10-26T03:20:14.869Z",
+      "name": "actual-process-AES-ring-loss",
+      "broker_status": 503,
+      "expected_retryable_unavailable": true,
+      "only_AES_environment_entries_removed": true,
+      "HMAC_key_unchanged": true,
+      "native_admin_status": 200
+    },
+    {
+      "at": "2026-10-26T03:20:16.367Z",
+      "name": "missing-AES-fresh-complete-callback",
+      "user": "alice",
+      "complete_callback_status": 200,
+      "same_native_uuid": true,
+      "credential_state": "invalidated",
+      "generation_before": 7,
+      "generation_after": 8,
+      "capture_behavior": "keyloss"
+    },
+    {
+      "at": "2026-10-26T03:20:16.427Z",
+      "name": "keyloss-callback-provider-material-cleanup",
+      "new_synthetic_provider_sessions": 1,
+      "targeted_delete_status": 204,
+      "preexisting_provider_sessions_untouched": true
+    },
+    {
+      "at": "2026-10-26T03:20:41.104Z",
+      "name": "restored-AES-ring-preserves-generation-reconnect",
+      "broker_status": 409,
+      "valid_ring_restored": true,
+      "invalidated_generation_not_resurrected": true
+    },
+    {
+      "at": "2026-10-26T03:22:00.743Z",
+      "name": "restored-AES-fresh-reconnect",
+      "user": "alice",
+      "complete_callback_status": 200,
+      "same_native_uuid": true,
+      "credential_state": "ready",
+      "generation_before": 8,
+      "generation_after": 9,
+      "capture_behavior": "capture"
+    },
+    {
+      "at": "2026-10-26T03:22:01.273Z",
+      "name": "actual-login-off-delegated-use",
+      "login_connect_status": 400,
+      "login_callback_status": 400,
+      "signed_broker_status": 200,
+      "stored_subject_contract_valid": true
+    },
+    {
+      "at": "2026-10-26T03:22:01.397Z",
+      "name": "final-targeted-credential-disconnect-alice",
+      "status": 204,
+      "credential_state": "invalidated",
+      "ciphertext_removed_from_live_slot": true,
+      "remote_revocation": "best effort for the loaded current refresh token; no all-user provider logout"
+    },
+    {
+      "at": "2026-10-26T03:22:01.468Z",
+      "name": "final-targeted-credential-disconnect-bob",
+      "status": 204,
+      "credential_state": "invalidated",
+      "ciphertext_removed_from_live_slot": true,
+      "remote_revocation": "best effort for the loaded current refresh token; no all-user provider logout"
+    },
+    {
+      "at": "2026-10-26T03:22:03.014Z",
+      "name": "final-cleanup-verified",
+      "gate": "frozen",
+      "epoch": 11,
+      "login_disabled": true,
+      "broker_disabled": true,
+      "capture_disabled": true,
+      "client_secret_cleared_verified_private_file": true,
+      "original_issuer_restored": true,
+      "affected_synthetic_users": 3,
+      "affected_session_lists_zero": true,
+      "old_test_sessions": {
+        "alice": 401,
+        "bob": 401
+      },
+      "native_admin_original_session": 200,
+      "native_admin_fresh_password_login": 200,
+      "native_ordinary_sessions_not_targeted": true,
+      "temporary_caller_removed": true,
+      "active_plugin_ids": [
+        "mattermost-oidc"
+      ],
+      "database_volumes_preserved": true,
+      "private_key_files_retained_for_G2": true,
+      "mounted_receipt_intentionally_stale": true
+    },
+    {
+      "at": "2026-10-26T03:24:35.834Z",
+      "name": "live-version-and-config-separation",
+      "mattermost_version": "12.0.1",
+      "keycloak_image": "quay.io/keycloak/keycloak:26.8.1",
+      "keycloak_image_digest": "sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b",
+      "external_AES_HMAC_keys_absent_from_public_and_private_plugin_configuration": true,
+      "public_login_enabled": false
+    }
+  ]
+}
