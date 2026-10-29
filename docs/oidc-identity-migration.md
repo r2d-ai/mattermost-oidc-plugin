@@ -64,6 +64,12 @@ The following is a **synthetic schema example**, not a ready-to-apply map. Recei
 
 Every field shown is required. Each `import_legacy` row requires approved=true, existing nondeleted/nonbot `oidc` auth with `AuthData == subject`, the exact legacy mapping UUID, expected revision 0, and independent provenance. A `retain` row uses the exact existing binding revision, empty `expected_legacy_mapping`, and exact native auth fields; its other fields remain required. All rows must use the document issuer. Every existing committed binding for that issuer must appear as `retain`, or as an import already committed by this exact map transaction. Unknown unimported legacy accounts remain blocked. A different issuer may leave old issuer records untouched, but cannot claim a UUID already reserved by an old issuer.
 
+Include a deactivated user with an existing committed binding as a `retain` row;
+omitting it prevents activation. Retention requires matching committed forward
+and reverse records, revision, and native authentication fields. It preserves
+the binding only: a deactivated user remains ineligible for OIDC login and
+broker token issuance. An `import_legacy` row still requires an active user.
+
 `maintenance.scope_sha256` is the SHA-256 of the compact JSON string array of **all affected row UUIDs sorted lexicographically**, including retains. Empty scope is the digest of `[]`. Use `encoding/json`-compatible encoding when computing pair and scope digests. `all_nodes_quiesced` and `affected_sessions_revoked` are administrator attestations, not automated remote-node checks. `evidence_ref` must identify the actual maintenance evidence a release reviewer will inspect.
 
 ## Maintenance and activation

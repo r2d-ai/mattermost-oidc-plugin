@@ -324,9 +324,12 @@ claim uses a 131-second slot lifetime, reserving the call budget and rounding
 so a successful durable acknowledgement has at least 120 seconds remaining.
 An acknowledgement with less remaining retention denies issuance. An exact
 replay returns 401. Each slot stores up to 32 live digests in a CAS-controlled
-bucket; a full bucket returns 503. Never evict a live digest. Old nodes cannot
-read the new bucket format and fail closed, so drain broker traffic while
-upgrading all nodes and do not roll back with broker admission enabled. Use fresh nonces on retry. Four fixed slots are lazily scanned per
+bucket, so different nonces that select the same slot can coexist. A full
+bucket returns 503 even when other slots have capacity; the implementation does
+not probe another slot. Never evict a live digest. New nodes can read legacy
+single-entry slots, but old nodes cannot read the new bucket format and fail
+closed. Drain broker traffic while upgrading every serving node, and do not roll
+back while broker admission is enabled. Use fresh nonces on retry. Four fixed slots are lazily scanned per
 accepted request; cleanup compares exact expired bytes so it cannot erase a
 replacement. KV failure or ambiguous CAS acknowledgement fails closed.
 
