@@ -1,5 +1,11 @@
 # Encrypted delegated credentials
 
+For fork provenance and merge/backport requirements, see
+[fork differences](fork-differences.md) and [upstream updates](upstream-updates.md).
+Historical B0/B1/B2/B3 labels refer to identity, persistence, lifecycle, and broker
+layers, all implemented in this fork. Historical deployed evidence is tied to
+`cfbd710`; it does not verify later hardening builds or production rollout.
+
 The plugin captures encrypted OIDC credentials, serializes refresh/disconnect,
 and provides a fixed authenticated Plane token exchange broker. It does not
 alter ordinary login scopes. In particular, do not request offline access merely to serve
@@ -39,7 +45,7 @@ accepted. Duplicate IDs, invalid base64, wrong key lengths, missing active ID,
 and malformed input deny capture/load. Inactive keys decrypt only.
 
 Never place raw keys in plugin KV, System Console settings, browser/public
-configuration, logs, or a committed file. The existing KV `encryptionKey` signs
+configuration, logs, or a committed file. The existing KV `_plugin_encryption_key` signs
 OAuth state only and is never a credential-encryption fallback. Missing keys
 do not disable native OIDC login, and key loading is independent of tombstoning.
 
@@ -112,7 +118,7 @@ They still disclose key IDs, slot digests and concurrency metadata. Access to a
 backup plus its corresponding encryption keys exposes the enclosed tokens.
 Keep secret and database backups separately controlled.
 
-## Limits and later stages
+## Transaction limits and layer boundaries
 
 Mattermost core session creation/revocation, plugin KV and configuration are not
 one atomic transaction. Assertions and exact CAS writes narrow races; they do
@@ -124,16 +130,16 @@ unreleased session. Token consumers must reassert authority at use/release.
 The lifecycle below owns rotating-refresh exclusion, crash/response ambiguity
 and token revocation. The broker owns caller authentication, durable
 replay checks, exact audience/scope exchange and release of only a short-lived
-`plane-api` token. PluginHTTP alone is not caller authentication. This stage's
-internal store methods are not public authorization interfaces.
+`plane-api` token. PluginHTTP alone is not caller authentication. Internal
+credential store methods are not public authorization interfaces.
 
 
 ## Distributed refresh and deadline semantics
 
 `TokenLifecycle.UserAccessToken` and `AssertGeneration` are internal interfaces,
 not caller authentication. A token value is excluded from JSON and ordinary Go
-formatting. B3 must still authenticate its server caller, constrain exchange,
-and reassert generation and identity before release. It must not issue from a
+formatting. The B3 broker authenticates its server caller, constrains exchange,
+and reasserts generation and identity before release. It must not issue from a
 raw user ID or a PluginHTTP call alone.
 
 The lifecycle rereads the current Mattermost user (including `DeleteAt`, bot
@@ -236,8 +242,9 @@ Ordinary device logout leaves other sessions and delegated credentials intact.
 Use explicit disconnect/revoke to invalidate delegated access. A fresh verified
 OIDC login may reconnect by publishing a strictly later generation; no tombstone
 counter may be reset. Tests use synthetic in-process TLS and shared fake durable
-KV. This stage does not establish installed-runtime capture, backup handling or
-B3/G2 deployment acceptance; the historical local fixture remains frozen.
+KV. Those automated fixtures do not establish installed-runtime capture, backup
+handling, or deployment acceptance. The separate historical runtime evidence
+below applies only to its recorded build and isolated environment.
 
 
 ## Authenticated fixed Plane broker
@@ -404,6 +411,8 @@ disable integration, retire keys, investigate audit and fence affected records.
 
 Unit tests and packaging validation do not prove installed environment
 inheritance, callback capture, encrypted database backups or deployed PluginHTTP
-behavior. Those synthetic-runtime gates and independent task review remain
-required before rollout. P2 and production remain disabled pending their shared
-gate; no unsigned exchange fallback is permitted.
+behavior. Historical [isolated runtime evidence](evidence/plane-broker-live.md)
+records those checks for `cfbd710` only. Later hardening builds need their own
+applicable runtime checks and independent acceptance before rollout. That
+evidence does not authorize Plane/P2 or production enablement; no unsigned
+exchange fallback is permitted.

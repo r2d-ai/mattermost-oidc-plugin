@@ -4,6 +4,13 @@ A tiny reverse-proxy shim that lets the **native Mattermost mobile app** log in
 through the `mattermost-oidc` plugin — on a server (e.g. Mostlymatter) where the
 built-in OpenID provider is not enabled.
 
+In the `r2d-ai` fork, complete [identity bootstrap or reviewed legacy
+import](../docs/oidc-identity-migration.md) before testing mobile login. The bridge
+does not initialize or bypass the identity gate. Its button injection follows
+the plugin's public enable/config status, which does not establish identity-gate
+readiness. See [fork differences](../docs/fork-differences.md) before backporting
+changes to the bridge or plugin callback.
+
 ## ⚠️ Licensing note
 
 This shim spoofs the `EnableSignUpWithOpenId` client-config flag that Mattermost

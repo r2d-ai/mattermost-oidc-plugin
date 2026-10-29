@@ -2,6 +2,12 @@
 
 This foundation binds a verified `(issuer, subject)` to one Mattermost UUID. Email is profile data. Native password login and emergency system administrators remain independent of the OIDC gate.
 
+This runbook covers the identity layer, called B0 in historical evidence.
+The fork also implements encrypted credential capture, refresh/revocation, and
+the Plane broker. See [fork differences](fork-differences.md) and
+[broker operations](plane-broker-operations.md) for those layers. Follow
+[upstream updates](upstream-updates.md) when changing the login implementation.
+
 An existing raw-sub lookup is **not** proof of its original issuer. Unapproved legacy accounts fail closed until an administrator reviews independent provenance and imports the exact binding. `AutoLinkByEmail` is retained only for configuration compatibility and has no effect. Existing native password accounts cannot be imported or automatically converted to OIDC.
 
 ## Identity and native fields
@@ -10,7 +16,10 @@ New accounts keep `AuthService = "oidc"`. Their native AuthData is `v2:` followe
 
 The registry uses `identity_v1_pair_<digest>` and `identity_v1_user_<UUID>`. Both directions must be committed and agree on the complete tuple, UUID, revision, transaction and native auth fields. Pending or conflicting entries authorize nothing. New-account creation persists the chosen username before attempting core creation. Recovery first checks that same username and exact expected native auth. A lost creation response can resume; an ambiguous outcome, renamed pending user, or changed auth fields requires explicit operator reconciliation. Do not delete reservations to retry blindly. A crash between recording a create attempt and the actual core call is deliberately treated as ambiguous.
 
-A committed UUID cannot be reassigned to another pair. This release provides no rebind, native secondary-account linking, credential capture, token exchange, bot or broker API.
+A committed UUID cannot be reassigned to another pair. There is no rebind or
+native secondary-account linking API. Credential capture and token exchange are
+implemented separately on top of this identity authority; the broker requires
+its own authenticated caller and never accepts a UUID alone as authorization.
 
 ## Administrative commands
 
@@ -109,4 +118,14 @@ The bundle now uses a flat archive root and is checked by `scripts/test_bundle.p
 
 ## Handoff
 
-B1/B2/B3 consume `ResolvedIdentity`, `AssertCurrentBinding` and `ResolveBrokerBinding` only after their caller authentication/verified OIDC requirements. The binding carries issuer, subject, Mattermost UUID, native auth expectations, binding revision, gate epoch and identity fingerprint. Reassert it before credential save/use/release. B0 owns identity revision and gate epoch only. B1's `CredentialStore` owns the sole monotonic credential generation/tombstone counter, shared with B2; B0 introduces no credential activation protocol. Credential storage, encrypted publication, refresh/disconnect, exchange and bot command authorization remain separate work.
+B1 credential storage, B2 lifecycle, and B3 broker consume `ResolvedIdentity`,
+`AssertCurrentBinding`, and `ResolveBrokerBinding` only after their caller
+authentication or verified OIDC requirements. The binding carries issuer,
+subject, Mattermost UUID, native auth expectations, binding revision, gate epoch,
+and identity fingerprint. Reassert it before credential save/use/release.
+B0 owns identity revision and gate epoch only. `CredentialStore` owns the sole
+monotonic credential generation/tombstone counter shared with `TokenLifecycle`.
+Capture, refresh/disconnect, and exchange are implemented in this fork and
+documented in [broker operations](plane-broker-operations.md). Bot command
+authorization and the Plane application itself belong to the separate caller
+integration; this repository provides the fixed token broker.

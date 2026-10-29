@@ -2,6 +2,26 @@
 
 A Mattermost / Mostlymatter plugin that adds **OpenID Connect (OIDC)** authentication for [Mattermost](https://mattermost.com) and [Mostlymatter](https://framagit.org/framasoft/framateam/mostlymatter) without an Enterprise license.
 
+## This fork
+
+This repository is [r2d-ai's fork](https://github.com/r2d-ai/mattermost-oidc-plugin)
+of [server-camp/mattermost-oidc-plugin](https://github.com/server-camp/mattermost-oidc-plugin).
+It adds an approved issuer/subject identity registry, encrypted OIDC credential
+retention, distributed refresh/revocation, and an authenticated fixed Plane token
+broker. Ordinary web, Desktop popup, and mobile login are retained.
+
+First installs and upgrades from upstream require [identity bootstrap or reviewed legacy
+import](docs/oidc-identity-migration.md), even when delegated access is disabled.
+Email-based account linking is unsupported in this fork. A missing or frozen
+identity gate blocks OIDC login; keep a separate native password administrator.
+
+- [Fork differences and complete commit ledger](docs/fork-differences.md)
+- [Merge/backport procedure and required regression checks](docs/upstream-updates.md)
+- [Plane broker configuration, keys, API, and operational limits](docs/plane-broker-operations.md)
+
+The manifest remains `0.6.2` at the documented audit head. Upstream's matching
+version has different behavior. Identify builds by source SHA and archive SHA256.
+
 ## Why this plugin?
 
 Mattermost restricts generic OIDC authentication to the Enterprise/Professional editions. The free Team Edition only supports GitLab as an SSO provider (and even this only in version 10). This plugin bypasses that limitation by implementing a full OIDC flow as a plugin that works with any standards-compliant OIDC provider.
@@ -39,14 +59,17 @@ Please note that the OIDC provider must support **PKCE S256** (standard with OAu
 3. User authenticates with the provider
 4. Provider redirects back to the plugin callback
 5. Plugin exchanges the code for tokens, verifies the ID token
-6. Plugin creates/updates the Mattermost user and creates a session
+6. Plugin resolves the approved issuer/subject binding, creates or updates the
+   Mattermost user, and creates a session after current identity checks
+7. If credential persistence is enabled, plugin fences and optionally captures
+   encrypted credentials before completing web, Desktop popup, or mobile login
 
 This covers **web and desktop** clients out of the box. For the **native mobile app**, an optional reverse-proxy shim ([`mobile-bridge/`](mobile-bridge/README.md)) is required — see [Native mobile app](#native-mobile-app) below.
 
 ## Prerequisites
 
-- **Go** 1.26+
-- **Node.js** 22+ and npm
+- **Go** compatible with `server/go.mod`, currently 1.26.7+
+- **Node.js** 24 and npm, matching CI
 - **Make**
 - Mattermost / Mostlymatter Server v9.0+
 
@@ -61,7 +84,7 @@ cd mattermost-oidc-plugin
 make all
 
 # The bundle will be at:
-# dist/mattermost-oidc-0.1.0.tar.gz
+# dist/mattermost-oidc-0.6.2.tar.gz (version from plugin.json)
 ```
 
 ### Build server or webapp only
@@ -84,6 +107,13 @@ make test
 
 # Go linting (requires golangci-lint)
 make lint
+
+# Separate mobile-bridge module
+(cd mobile-bridge && go vet ./... && go test -race ./... -count=1)
+
+# Documented fork history and archive-validator fixtures
+python3 scripts/check_fork_docs.py
+python3 scripts/test_bundle_validator.py
 ```
 
 ## Installation
@@ -92,8 +122,9 @@ make lint
 
 1. Go to **System Console → Plugin Management**
 2. Click **Upload Plugin**
-3. Download the latest `.tar.gz` from the [Releases page](https://github.com/server-camp/mattermost-oidc-plugin/releases)
-4. Enable the plugin
+3. Download this fork's `.tar.gz` from the [Releases page](https://github.com/r2d-ai/mattermost-oidc-plugin/releases), or build it from the required source commit
+4. Enable the plugin, keep OIDC login disabled during identity maintenance, and
+   follow [identity bootstrap or migration](docs/oidc-identity-migration.md)
 
 ### Method 2: CLI Deploy
 
@@ -123,6 +154,8 @@ Go to **System Console → Plugins → OIDC Authentication**:
 | Field                                    | Description                       | Example                                               |
 |------------------------------------------|-----------------------------------|-------------------------------------------------------|
 | **Enable**                               | Enable the plugin                 | `true`                                                |
+| **Retain Encrypted OIDC Credentials**     | Optional fresh-login capture; requires external AES ring | `false` |
+| **Enable Plane Delegated Access**        | Fixed broker; also requires persistence and external HMAC ring | `false` |
 | **Issuer URL**                           | OIDC Issuer URL                   | `https://idp.example.com/application/o/mostlymatter/` |
 | **Client ID**                            | Client ID from your provider      | `mostlymatter`                                        |
 | **Client Secret**                        | Client secret from your provider  | `secret123`                                           |
@@ -137,14 +170,28 @@ Go to **System Console → Plugins → OIDC Authentication**:
 | **Email Verified Claim**                 | OIDC claim for email verification | _(empty, set to `email_verified` to enable)_          |
 | **Require Email Verified**               | Reject login if claim is not true | `false`                                               |
 | **Auto-Create Accounts**                 | Automatically create new accounts | `true`                                                |
-| **Auto-Link Existing Accounts by Email** | Link existing accounts by email   | `false`                                               |
+| **Auto-link by email (unsupported)**      | Ignored compatibility setting; never grants identity ownership | `false` |
 | **Default Team**                         | Team slug for new users           | `main`                                                |
 
-When **Auto-Link Existing Accounts by Email** is enabled, consider also enabling **Require Email Verified** after setting **Email Verified Claim** to `email_verified` (or your provider's claim name) if your identity provider sends that claim. This prevents linking to an existing account via an unverified email address.
+Email is profile data, including when it is verified. It never establishes
+ownership of an existing account. Legacy OIDC users need an independently
+reviewed issuer/subject import. Existing native password accounts cannot be
+automatically converted to OIDC.
 
-### 3. Restart the server
+The two delegated settings default to false and are live policy. They do not
+change pending callback fingerprints. Disabling interactive **Enable** alone
+does not disable delegated access. Turning either delegated setting off stops
+issuance but does not durably revoke stored credentials. See
+[Plane broker operations](docs/plane-broker-operations.md) before enabling them.
 
-After saving, the Mattermost / Mostlymatter server must be restarted.
+### 3. Approve the identity gate
+
+Use the [identity maintenance procedure](docs/oidc-identity-migration.md#maintenance-and-activation)
+to freeze, validate, apply, and activate an approved map. An empty installation
+still requires explicit approval of an empty map. Imported users keep their
+UUID, memberships, and native OIDC auth fields. A restart does not initialize
+or reactivate the gate. After activation, enable OIDC login and verify the
+complete callback with the intended client.
 
 ## Example: Keycloak Configuration
 
@@ -179,6 +226,9 @@ mattermost-oidc-plugin/
 ├── plugin.json              # Plugin manifest and settings schema
 ├── Makefile                 # Build system
 ├── README.md                # This file
+├── AGENTS.md                # Fork contracts and agent workflow
+├── docs/                    # Fork ledger, upstream updates, identity/broker runbooks
+├── scripts/                 # Fork documentation and archive checks
 ├── assets/
 │   └── oidc-icon.svg        # Plugin icon
 ├── server/
@@ -186,7 +236,13 @@ mattermost-oidc-plugin/
 │   ├── main.go              # Entry point
 │   ├── plugin.go            # Plugin struct, lifecycle, router
 │   ├── configuration.go     # Configuration type and validation
-│   └── oauth2.go            # OIDC/OAuth2 flow handlers
+│   ├── oauth2.go            # Verified callback, session/capture and completion
+│   ├── login_snapshot.go    # Coherent login configuration and fingerprints
+│   ├── identity_*.go        # Pair registry, gate, migration and admin commands
+│   ├── credential_store.go  # Encrypted CAS envelope and generation
+│   ├── token_lifecycle.go   # Distributed refresh and revocation
+│   ├── broker_auth.go       # HMAC, replay buckets and quotas
+│   └── plane_broker.go      # Fixed exchange and verified output
 ├── webapp/
 │   ├── package.json         # Node dependencies
 │   ├── webpack.config.js    # Webpack configuration
@@ -205,6 +261,12 @@ mattermost-oidc-plugin/
 - **`nonce`** is always sent and checked on the ID token
 - **State tokens** are stored in the KV store with an expiry time
 - **ID token verification** via the provider's JWKS
+- **Issuer/subject ownership** uses committed bidirectional identity records,
+  current native auth checks, and an explicitly approved durable gate
+- **Optional retained credentials** use AES-256-GCM with external keys, one
+  monotonic CAS generation, and durable invalidation
+- **Delegated Plane tokens** require canonical caller HMAC, durable replay
+  checks, constrained exchange, and verified output claims
 - **No client secret** is sent to the browser
 - **Secure cookies** are set when HTTPS is configured
 - **Username sanitization** prevents injection attacks
@@ -296,12 +358,14 @@ The repository uses GitHub Actions (`.github/workflows/ci.yml`):
 
 | Job             | Trigger          | Description                                              |
 |-----------------|------------------|----------------------------------------------------------|
-| `test-server`   | every push / PR  | Go tests with race detection and coverage                |
+| `test-server`   | every push / PR  | Module verification and Go tests with race detection and coverage |
+| `test-mobile-bridge` | every push / PR | Separate module vet and race tests |
 | `lint-server`   | every push / PR  | golangci-lint (non-blocking)                             |
 | `build-server`  | every push / PR  | Cross-compile for linux/darwin × amd64/arm64             |
 | `build-webapp`  | every push / PR  | `npm ci && webpack` production build                     |
-| `build-bundle`  | every push / PR  | Package all artifacts into `.tar.gz`                     |
-| `release`       | `v*` tags only   | Publish GitHub Release with the bundle as release asset  |
+| `build-bundle`  | every push / PR  | Flat archive, manifest-artifact validation, validator fixtures |
+| `build-mobile-bridge` | every push / PR | Multi-architecture bridge image; published outside PRs |
+| `release`       | `v*` tags on main | Verify bundle version/executables and publish bundle plus SHA256SUMS |
 
 The pipeline runs automatically on every push and pull request. To cut a release, use `make release` and push the resulting tag.
 
