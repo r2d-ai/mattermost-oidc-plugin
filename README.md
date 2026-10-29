@@ -20,7 +20,7 @@ identity gate blocks OIDC login; keep a separate native password administrator.
 - [Merge/backport procedure and required regression checks](docs/upstream-updates.md)
 - [Plane broker configuration, keys, API, and operational limits](docs/plane-broker-operations.md)
 
-The manifest is `0.7.0` after integrating upstream tag `v0.7.0` at `cbb7bda`.
+The fork release is `0.7.0-p1`, based on upstream tag `v0.7.0` at `cbb7bda`.
 Upstream's matching version has different identity and delegated-access behavior. Identify builds by source SHA and archive SHA256.
 
 ## Why this plugin?
@@ -85,7 +85,7 @@ cd mattermost-oidc-plugin
 make all
 
 # The bundle will be at:
-# dist/mattermost-oidc-0.7.0.tar.gz (version from plugin.json)
+# dist/mattermost-oidc-0.7.0-p1.tar.gz (version from plugin.json)
 ```
 
 ### Build server or webapp only

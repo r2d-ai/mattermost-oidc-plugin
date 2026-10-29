@@ -12,7 +12,7 @@ backporting upstream changes, follow [the upstream update procedure](docs/upstre
 Upstream files and tests do not describe all of this fork's requirements.
 
 The original common ancestor is upstream `v0.6.2`, `99920ca`. Upstream `v0.7.0`
-was integrated from `cbb7bda`; the manifest now says `0.7.0`. The version alone
+was integrated from `cbb7bda`; the fork release manifest now says `0.7.0-p1`. The version alone
 cannot distinguish upstream from this fork. Record source SHA and archive SHA256.
 
 ## Contracts to preserve
