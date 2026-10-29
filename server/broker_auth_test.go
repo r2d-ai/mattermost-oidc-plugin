@@ -134,7 +134,11 @@ func TestBrokerReplayCapacityAndFailure(t *testing.T) {
 	p, a, _ := fixtureIdentity(t)
 	now := time.Now()
 	for i := range uint16(brokerNonceSlots) {
-		a.kv[nonceSlot(i)], _ = json.Marshal(brokerNonce{strings.Repeat("a", 64), now.Unix() + 120})
+		entries := make([]brokerNonce, 32)
+		for j := range entries {
+			entries[j] = brokerNonce{strings.Repeat("a", 64), now.Unix() + 120}
+		}
+		a.kv[nonceSlot(i)], _ = json.Marshal(entries)
 	}
 	r := signedBrokerRequest(`{}`, 0)
 	require.ErrorIs(t, p.authenticateBroker(r, []byte(`{}`), now), ErrTemporarilyUnavailable)
@@ -173,9 +177,10 @@ func TestBrokerNonceRetentionAndCleanup(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, key)
-	var nonce brokerNonce
-	require.NoError(t, json.Unmarshal(a.kv[key], &nonce))
-	require.GreaterOrEqual(t, nonce.Expires, now.Unix()+120)
+	entries, valid := decodeNonceBucket(a.kv[key])
+	require.True(t, valid)
+	require.Len(t, entries, 1)
+	require.GreaterOrEqual(t, entries[0].Expires, now.Unix()+120)
 	p.broker.sweep = 0
 	for range brokerNonceSlots / 4 {
 		p.cleanupBrokerNonces(now.Add(119 * time.Second))
@@ -258,4 +263,28 @@ func TestBrokerIntegrationQuotaPrecedesReplayStorage(t *testing.T) {
 	r := signedBrokerRequest(`{}`, 0)
 	require.ErrorIs(t, p.authenticateBroker(r, []byte(`{}`), now), ErrTemporarilyUnavailable)
 	require.Len(t, a.kv, 1, "throttled valid HMAC must not allocate replay state for invalid JSON")
+}
+
+func TestBrokerCollidingNoncesAndReplay(t *testing.T) {
+	brokerKeys(t)
+	p, _, _ := fixtureIdentity(t)
+	first := signedBrokerRequest(`{}`, 0)
+	digest := sha256.Sum256([]byte(first.Header.Get("X-Plane-Nonce")))
+	slot := (uint16(digest[0])<<8 | uint16(digest[1])) % brokerNonceSlots
+	second := signedBrokerRequest(`{}`, 0)
+	for {
+		nonce := make([]byte, 32)
+		_, _ = rand.Read(nonce)
+		encoded := base64.RawURLEncoding.EncodeToString(nonce)
+		d := sha256.Sum256([]byte(encoded))
+		if (uint16(d[0])<<8|uint16(d[1]))%brokerNonceSlots == slot && encoded != first.Header.Get("X-Plane-Nonce") {
+			second.Header.Set("X-Plane-Nonce", encoded)
+			break
+		}
+	}
+	resignBrokerRequest(second, `{}`, testBrokerKey)
+	require.NoError(t, p.authenticateBroker(first, []byte(`{}`), time.Now()))
+	require.NoError(t, p.authenticateBroker(second, []byte(`{}`), time.Now()))
+	require.ErrorIs(t, p.authenticateBroker(first, []byte(`{}`), time.Now()), errBrokerSignature)
+	require.ErrorIs(t, p.authenticateBroker(second, []byte(`{}`), time.Now()), errBrokerSignature)
 }

@@ -145,27 +145,30 @@ func (p *Plugin) authenticateBroker(r *http.Request, body []byte, now time.Time)
 	encoded := hex.EncodeToString(digest[:])
 	index := (uint16(digest[0])<<8 | uint16(digest[1])) % brokerNonceSlots
 	key := nonceSlot(index)
-	for range 4 {
+	for range 8 {
 		raw, ae := p.API.KVGet(key)
 		if ae != nil {
 			return ErrTemporarilyUnavailable
 		}
-		if len(raw) > 0 {
-			var old brokerNonce
-			if len(raw) > 256 || json.Unmarshal(raw, &old) != nil || len(old.Digest) != 64 || old.Expires <= 0 {
-				return ErrTemporarilyUnavailable
-			}
+		entries, valid := decodeNonceBucket(raw)
+		if !valid {
+			return ErrTemporarilyUnavailable
+		}
+		live := make([]brokerNonce, 0, len(entries)+1)
+		for _, old := range entries {
 			if old.Expires > now.Unix() {
 				if old.Digest == encoded {
 					return errBrokerSignature
 				}
-				return ErrTemporarilyUnavailable
+				live = append(live, old)
 			}
 		}
-		// Reserve the whole-call budget plus integer-second rounding so even
-		// a delayed durable ACK retains at least 120 seconds of replay state.
+		if len(live) >= 32 {
+			return ErrTemporarilyUnavailable
+		}
 		expires := time.Now().Unix() + 131
-		next, _ := json.Marshal(brokerNonce{encoded, expires})
+		live = append(live, brokerNonce{encoded, expires})
+		next, _ := json.Marshal(live)
 		ok, ae := p.API.KVCompareAndSet(key, raw, next)
 		if ae != nil {
 			return ErrTemporarilyUnavailable
@@ -181,8 +184,33 @@ func (p *Plugin) authenticateBroker(r *http.Request, body []byte, now time.Time)
 	return ErrTemporarilyUnavailable
 }
 
-// Scan exactly four fixed slots per accepted request. Exact-byte deletion cannot
-// erase a concurrent replacement; live slots are never evicted, even when full.
+// Accept legacy single-entry values during rolling upgrades.
+func decodeNonceBucket(raw []byte) ([]brokerNonce, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	if len(raw) > 4096 {
+		return nil, false
+	}
+	var entries []brokerNonce
+	if raw[0] == '[' {
+		if json.Unmarshal(raw, &entries) != nil || len(entries) > 32 {
+			return nil, false
+		}
+	} else {
+		var entry brokerNonce
+		if json.Unmarshal(raw, &entry) != nil {
+			return nil, false
+		}
+		entries = []brokerNonce{entry}
+	}
+	for _, entry := range entries {
+		if len(entry.Digest) != 64 || entry.Expires <= 0 {
+			return nil, false
+		}
+	}
+	return entries, true
+}
 func (p *Plugin) cleanupBrokerNonces(now time.Time) {
 	p.broker.mu.Lock()
 	start := p.broker.sweep
@@ -191,11 +219,21 @@ func (p *Plugin) cleanupBrokerNonces(now time.Time) {
 	for i := range uint16(4) {
 		key := nonceSlot((start + i) % brokerNonceSlots)
 		raw, ae := p.API.KVGet(key)
-		if ae != nil || len(raw) == 0 || len(raw) > 256 {
+		if ae != nil || len(raw) == 0 {
 			continue
 		}
-		var old brokerNonce
-		if json.Unmarshal(raw, &old) == nil && old.Expires > 0 && old.Expires <= now.Unix() {
+		entries, ok := decodeNonceBucket(raw)
+		if !ok {
+			continue
+		}
+		expired := true
+		for _, entry := range entries {
+			if entry.Expires > now.Unix() {
+				expired = false
+				break
+			}
+		}
+		if expired {
 			_, _ = p.API.KVCompareAndDelete(key, raw)
 		}
 	}

@@ -215,3 +215,27 @@ func TestIdentityApplyPartialResumeAfterReverseCommit(t *testing.T) {
 	require.NoError(t, p.AssertCurrentBinding(context.Background(), resolvedBinding))
 	require.Zero(t, a.creates+a.updates+a.sessions)
 }
+
+func TestInactiveRetainedBindingAllowsMaintenanceButDeniesBroker(t *testing.T) {
+	p, a, m := legacyMap(t)
+	b, h := mapBytes(t, m)
+	p.readApprovalFile = func() ([]byte, error) { return b, nil }
+	require.NoError(t, p.applyApprovalMap(h))
+	require.NoError(t, p.activateApprovalMap(h))
+	userID := m.Rows[0].MattermostUserID
+	a.users[userID].DeleteAt = 1
+	gate, e := p.freezeIdentityGate()
+	require.NoError(t, e)
+	row := m.Rows[0]
+	row.Action = "retain"
+	row.ExpectedBindingRevision = 1
+	row.ExpectedLegacyMapping = ""
+	m.Rows = []approvalRow{row}
+	m.ExpectedGateEpoch = gate.Epoch
+	b, h = mapBytes(t, m)
+	p.readApprovalFile = func() ([]byte, error) { return b, nil }
+	require.NoError(t, p.applyApprovalMap(h))
+	require.NoError(t, p.activateApprovalMap(h))
+	_, e = p.ResolveBrokerBinding(context.Background(), userID)
+	require.Error(t, e)
+}

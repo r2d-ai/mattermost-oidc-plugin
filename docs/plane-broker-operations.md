@@ -323,10 +323,10 @@ ID. The SHA256 nonce digest selects one of 4,096 fixed slots. An acknowledged
 claim uses a 131-second slot lifetime, reserving the call budget and rounding
 so a successful durable acknowledgement has at least 120 seconds remaining.
 An acknowledgement with less remaining retention denies issuance. An exact
-replay returns 401. A different live digest in the same slot returns 503 even
-if another slot is empty. This conservative collision policy sacrifices
-availability to preserve a hard cluster-wide capacity bound. Never evict a
-live slot. Use fresh nonces on retry. Four fixed slots are lazily scanned per
+replay returns 401. Each slot stores up to 32 live digests in a CAS-controlled
+bucket; a full bucket returns 503. Never evict a live digest. Old nodes cannot
+read the new bucket format and fail closed, so drain broker traffic while
+upgrading all nodes and do not roll back with broker admission enabled. Use fresh nonces on retry. Four fixed slots are lazily scanned per
 accepted request; cleanup compares exact expired bytes so it cannot erase a
 replacement. KV failure or ambiguous CAS acknowledgement fails closed.
 

@@ -197,13 +197,22 @@ func (p *Plugin) validateApprovalRow(row approvalRow, h string, i int) (identity
 	if ae != nil {
 		return identityRecord{}, ErrIdentityUnavailable
 	}
-	if u == nil || u.DeleteAt != 0 || u.IsBot || u.AuthService != row.ExpectedAuthService || u.AuthData == nil || *u.AuthData != row.ExpectedAuthData {
+	if u == nil || (u.DeleteAt != 0 && row.Action != "retain") || u.IsBot || u.AuthService != row.ExpectedAuthService || u.AuthData == nil || *u.AuthData != row.ExpectedAuthData {
 		return identityRecord{}, ErrIdentityConflict
 	}
 	if row.Action == "retain" {
-		r, _, e := p.committedIdentity(b)
+		r, _, e := p.readIdentityRecord(pairKey(b))
 		if e != nil {
 			return r, e
+		}
+		reverse, _, e := p.readIdentityRecord(identityUserPrefix + b.MattermostUserID)
+		if e != nil {
+			return r, e
+		}
+		candidate := *u
+		candidate.DeleteAt = 0
+		if r.Binding != b || r.State != "committed" || reverse != r || !validNative(&candidate, r) {
+			return r, ErrIdentityConflict
 		}
 		if r.Revision != row.ExpectedBindingRevision {
 			return r, ErrIdentityConflict
@@ -393,6 +402,9 @@ func (p *Plugin) activateParsedApprovalMap(m approvalMap, h string) error {
 		return e
 	}
 	for _, row := range m.Rows {
+		if row.Action == "retain" {
+			continue
+		}
 		if _, _, e = p.committedIdentity(IdentityBinding{row.Issuer, row.Subject, row.MattermostUserID}); e != nil {
 			return e
 		}
