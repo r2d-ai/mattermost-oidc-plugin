@@ -323,7 +323,7 @@ func (s *CredentialStore) Load(ctx context.Context, binding IdentityBinding) (St
 		return empty, ErrCredentialsUnavailable
 	}
 	aead, err := credentialAEAD(keys[env.KeyID])
-	if err != nil || len(env.Nonce) != aead.NonceSize() {
+	if err != nil || len(env.Nonce) != aead.NonceSize() || len(env.Ciphertext) > maxCredentialRecord {
 		return empty, ErrCredentialsUnavailable
 	}
 	plain, err := aead.Open(nil, env.Nonce, env.Ciphertext, credentialAAD(env, binding, r.GateEpoch, r.BindingRevision))

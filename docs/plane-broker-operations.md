@@ -335,8 +335,10 @@ calls per UTC minute across the integration, and 10 per user per UTC minute.
 These fixed-window rate limits are per process/node and reset on restart; the
 replay slots are durable and cluster-wide. Integration quota is charged immediately after valid HMAC, before replay KV,
 including invalid JSON/scope requests. Per-user state is created only after
-signature, JSON and scope validation and is bounded by the integration limit.
+signature, JSON and scope validation and a successful current binding resolution; it is bounded by the integration limit.
 Exhausted limits return 503. Unauthenticated input cannot allocate user entries.
+
+A callback failure revokes the session created by that callback when identity authority fails; it does not revoke pre-existing ordinary sessions. Maintenance transitions require the separately documented session revocation procedure. Pending creation with an ambiguous outcome remains blocked until independently reviewed operator reconciliation; it is not automatically expired or reassigned.
 
 The whole call has a 10-second context budget. Every discovery, refresh,
 exchange and JWKS HTTP operation has a 5-second timeout within that budget;

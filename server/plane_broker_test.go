@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/stretchr/testify/require"
 	"math/big"
 	"net/http"
@@ -495,4 +496,13 @@ func TestBrokerEndpointRejectsNoncanonicalURLs(t *testing.T) {
 		require.False(t, brokerEndpoint(issuer, issuer+path), path)
 	}
 	require.False(t, brokerEndpoint(issuer, "https://other.example/token"))
+}
+
+func TestUnknownUserDoesNotConsumeUserQuota(t *testing.T) {
+	f := brokerFixture(t)
+	id := model.NewId()
+	body := strings.Replace(f.body(0, "plane.read"), f.users[0].Binding.MattermostUserID, id, 1)
+	response := serveBroker(f.p, signedBrokerRequest(body, 0))
+	require.NotEqual(t, 200, response.Code)
+	require.Zero(t, f.p.broker.users[id])
 }

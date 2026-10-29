@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
@@ -97,7 +98,7 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	}
 	code := "ok"
 	if e != nil {
-		code = e.Error()
+		code = identityCommandOutcome(e)
 	}
 	if sub == "freeze" || sub == "apply" || sub == "activate" {
 		p.API.LogInfo("OIDC identity maintenance", "actor_id", actor.Id, "approval_digest", digest, "count", count, "epoch", g.Epoch, "outcome", code)
@@ -106,4 +107,14 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 		return reply("outcome=" + code + " conflicts=1")
 	}
 	return reply(fmt.Sprintf("outcome=ok gate=%s epoch=%d approval_digest=%s rows=%d conflicts=0", g.Status, g.Epoch, g.ApprovedMapSHA256, count))
+}
+
+// Never expose raw storage/parser errors in the administrator response or log.
+func identityCommandOutcome(err error) string {
+	for _, known := range []error{ErrIdentityUnproven, ErrIdentityConflict, ErrIdentityGateClosed, ErrIdentityUnavailable} {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
+	}
+	return ErrIdentityUnavailable.Error()
 }

@@ -1045,7 +1045,7 @@ func TestOAuth2CompleteCallback(t *testing.T) {
 }
 
 func TestLoginSucceedsWhenPersistenceFails(t *testing.T) {
-	runCredentialCallbacks(t, []string{"missing_key", "publication_failure", "fence_failure", "persistence_disabled", "flag_during"})
+	runCredentialCallbacks(t, []string{"missing_key", "publication_failure", "fence_failure", "persistence_disabled", "flag_during", "missing_refresh"})
 }
 
 func runCredentialCallbacks(t *testing.T, modes []string) {
@@ -1106,7 +1106,11 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 					jwt, e := obj.CompactSerialize()
 					require.NoError(t, e)
 					issuedIDToken = jwt
-					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "test-access", "refresh_token": "test-refresh", "expires_in": 300, "refresh_expires_in": 600, "token_type": "Bearer", "id_token": jwt})
+					response := map[string]any{"access_token": "test-access", "refresh_token": "test-refresh", "expires_in": 300, "refresh_expires_in": 600, "token_type": "Bearer", "id_token": jwt}
+					if mode == "missing_refresh" {
+						delete(response, "refresh_token")
+					}
+					_ = json.NewEncoder(w).Encode(response)
 				default:
 					http.NotFound(w, r)
 				}
@@ -1216,7 +1220,7 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 			}
 			require.NotContains(t, public.Body.String(), "EnableTokenPersistence")
 			require.NotContains(t, public.Body.String(), "MM_OIDC_CREDENTIAL")
-			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during"
+			success := mode == "web" || mode == "popup" || mode == "mobile" || mode == "secret_fresh" || mode == "missing_key" || mode == "publication_failure" || mode == "persistence_disabled" || mode == "flag_during" || mode == "missing_refresh"
 			for _, v := range a.kv {
 				require.NotContains(t, string(v), "test-access")
 				require.NotContains(t, string(v), "test-refresh")
@@ -1248,6 +1252,15 @@ func runCredentialCallbacks(t *testing.T, modes []string) {
 					require.Equal(t, "test-refresh", c.RefreshToken)
 					require.WithinDuration(t, time.Now().Add(600*time.Second), c.RefreshExpiresAt, 5*time.Second)
 					require.WithinDuration(t, time.Now().Add(300*time.Second), c.AccessExpiresAt, 5*time.Second)
+				}
+			}
+			if mode == "missing_refresh" {
+				for k, raw := range a.kv {
+					if strings.HasPrefix(k, credentialPrefix) {
+						var env credentialEnvelope
+						require.NoError(t, json.Unmarshal(raw, &env))
+						require.Equal(t, "invalidated", env.State)
+					}
 				}
 			}
 			if success {

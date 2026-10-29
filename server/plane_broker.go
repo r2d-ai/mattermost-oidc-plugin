@@ -160,10 +160,6 @@ func (p *Plugin) handlePlaneBroker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operation = input.Scope
-	if !p.brokerRate(input.UserID, time.Now()) {
-		fail(ErrTemporarilyUnavailable)
-		return
-	}
 	p.configurationLock.RLock()
 	cfg := &Configuration{}
 	if p.configuration != nil {
@@ -186,6 +182,10 @@ func (p *Plugin) handlePlaneBroker(w http.ResponseWriter, r *http.Request) {
 	resolved, e := p.ResolveBrokerBinding(ctx, input.UserID)
 	if e != nil {
 		fail(lifecycleError(e))
+		return
+	}
+	if !p.brokerRate(input.UserID, time.Now()) {
+		fail(ErrTemporarilyUnavailable)
 		return
 	}
 	issuerFP = resolved.IdentityFingerprint

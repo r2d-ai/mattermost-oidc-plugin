@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/stretchr/testify/require"
 	"os"
@@ -69,4 +70,9 @@ func TestIdentityCommandReportsApprovedRowCount(t *testing.T) {
 	require.Nil(t, e)
 	require.Contains(t, reply.Text, "rows=1")
 	require.Equal(t, 1, reads)
+}
+
+func TestIdentityCommandOutcomeDoesNotExposeUnknownErrors(t *testing.T) {
+	require.Equal(t, "identity_unavailable", identityCommandOutcome(errors.New("secret detail")))
+	require.Equal(t, "identity_conflict", identityCommandOutcome(ErrIdentityConflict))
 }
