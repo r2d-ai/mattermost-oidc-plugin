@@ -12,7 +12,8 @@ backporting upstream changes, follow [the upstream update procedure](docs/upstre
 Upstream files and tests do not describe all of this fork's requirements.
 
 The original common ancestor is upstream `v0.6.2`, `99920ca`. Upstream `v0.7.0`
-was integrated from `cbb7bda`; the fork release manifest now says `0.7.0-p1`. The version alone
+was integrated from `cbb7bda`. Upstream `v0.8.0` was integrated from `7818bd0`
+as fork version `0.8.0-p1`. The version alone
 cannot distinguish upstream from this fork. Record source SHA and archive SHA256.
 
 ## Contracts to preserve
@@ -82,7 +83,7 @@ cannot distinguish upstream from this fork. Record source SHA and archive SHA256
 | `server/token_lifecycle.go` | Distributed rotating refresh, exact-owner cleanup, disconnect and generation assertions |
 | `server/broker_auth.go`, `server/plane_broker.go` | Caller HMAC, durable nonce buckets, quotas, constrained exchange and signed output verification |
 | `server/desktop.go` | Expiring single-use Desktop code, encrypted optional credential handoff, current authority at redeem |
-| `webapp/src/index.js`, `webapp/src/desktop_login.js` | React login button, Desktop system-browser/verifier flow, older-server DOM injection on `/login` |
+| `webapp/src/index.js`, `webapp/src/desktop_login.js` | React login button, Desktop system-browser/verifier flow, DOM injection on `/login`, including when core sign-in methods are disabled |
 | `mobile-bridge/` | Separate Go module and ingress proxy, mobile config injection gated on plugin enable, mobile-login redirect |
 | `scripts/test_bundle*.py`, `Makefile`, `.github/workflows/ci.yml` | Archive validation, builds and release verification |
 

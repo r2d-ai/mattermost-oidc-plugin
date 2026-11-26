@@ -175,6 +175,7 @@ Go to **System Console → Plugins → OIDC Authentication**:
 | **Require Email Verified**               | Reject login if claim is not true | `false`                                               |
 | **Auto-Create Accounts**                 | Automatically create new accounts | `true`                                                |
 | **Auto-link by email (unsupported)**      | Ignored compatibility setting; never grants identity ownership | `false` |
+| **Auto-Update Usernames on Login**       | Sync a bound account's username from the configured claim | `false` |
 | **Default Team**                         | Team slug for new users           | `main`                                                |
 
 Email is profile data, including when it is verified. It never establishes
@@ -187,6 +188,25 @@ change pending callback fingerprints. Disabling interactive **Enable** alone
 does not disable delegated access. Turning either delegated setting off stops
 issuance but does not durably revoke stored credentials. See
 [Plane broker operations](docs/plane-broker-operations.md) before enabling them.
+
+When username sync is enabled, a verified login can rename its bound account.
+A missing or blank claim leaves the current name in place. Mattermost rejects
+unavailable names, and a failed rename does not block the login.
+
+#### Client secret from the environment
+
+Instead of storing the client secret in the plugin configuration, set the
+`MM_OIDC_CLIENT_SECRET` environment variable on the Mattermost server process, e.g.
+inject it from a Kubernetes Secret using `env.valueFrom.secretKeyRef` or from a Compose
+env file. A non-empty value of this variable takes precedence over the **Client Secret**
+setting. Leave the setting empty so the credential stays out of plugin settings and the
+System Console database entirely.
+
+Set the variable on every Mattermost node that runs the plugin and restart those
+nodes after changing their environment. Each node resolves the effective secret
+when it loads plugin settings. Login, credential refresh, and Plane exchange
+share that in-memory value. A secret change invalidates pending callbacks while
+preserving the approved issuer and client ID.
 
 #### Desktop app
 
@@ -237,43 +257,6 @@ complete callback with the intended client.
    https://sso.example.com/application/o/mostlymatter/.well-known/openid-configuration
 
 Note that Authentik doesn't have a `family_name` claim. Mattermost optimistically skips parsing the family name if not present.
-
-## Project Structure
-
-```
-mattermost-oidc-plugin/
-├── plugin.json              # Plugin manifest and settings schema
-├── Makefile                 # Build system
-├── README.md                # This file
-├── AGENTS.md                # Fork contracts and agent workflow
-├── docs/                    # Fork ledger, upstream updates, identity/broker runbooks
-├── scripts/                 # Fork documentation and archive checks
-├── assets/
-│   └── oidc-icon.svg        # Plugin icon
-├── server/
-│   ├── go.mod               # Go module definition
-│   ├── main.go              # Entry point
-│   ├── plugin.go            # Plugin struct, lifecycle, router
-│   ├── configuration.go     # Configuration type and validation
-│   ├── oauth2.go            # Verified callback, session/capture and completion
-│   ├── desktop.go           # Verifier-bound Desktop handoff and redeem
-│   ├── login_snapshot.go    # Coherent login configuration and fingerprints
-│   ├── identity_*.go        # Pair registry, gate, migration and admin commands
-│   ├── credential_store.go  # Encrypted CAS envelope and generation
-│   ├── token_lifecycle.go   # Distributed refresh and revocation
-│   ├── broker_auth.go       # HMAC, replay buckets and quotas
-│   └── plane_broker.go      # Fixed exchange and verified output
-├── webapp/
-│   ├── package.json         # Node dependencies
-│   ├── webpack.config.js    # Webpack configuration
-│   └── src/
-│       ├── index.js         # Login button React component
-│       └── desktop_login.js # Desktop verifier, system browser and redeem
-└── mobile-bridge/           # Optional reverse-proxy shim for native mobile app
-    ├── main.go              # Shim: client-config injection + mobile_login redirect
-    ├── Dockerfile           # Container image for the shim
-    └── README.md            # Ingress wiring, env vars, test plan, troubleshooting
-```
 
 ## Security
 
@@ -326,6 +309,9 @@ The plugin side handles the mobile callback by handing the session token back to
 
 **Login button not visible**
 → Enable the plugin in the System Console, clear browser cache
+
+**Login page shows "This server doesn't have any sign-in methods enabled" without an OIDC button**
+→ The plugin's login card takeover needs the plugin to be enabled with a valid configuration (check the server logs) and its webapp bundle to load before login.
 
 **"failed to create user"**
 → Check that auto-create is enabled and that the username doesn't already exist

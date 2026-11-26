@@ -9,9 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	oidc "github.com/coreos/go-oidc/v3/oidc"
-	jose "github.com/go-jose/go-jose/v4"
-	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,9 +17,12 @@ import (
 	"testing"
 	"time"
 
+	oidc "github.com/coreos/go-oidc/v3/oidc"
+	jose "github.com/go-jose/go-jose/v4"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 )
 
@@ -384,6 +384,86 @@ func TestUpdateUserIfChanged(t *testing.T) {
 		if !updated.EmailVerified {
 			t.Error("EmailVerified should remain true when claim is absent")
 		}
+	})
+}
+
+func TestLoginUpdatesUsername(t *testing.T) {
+	newEnv := func(t *testing.T, username string, claims map[string]any) *loginEnv {
+		e := newLoginEnv(t, testSite)
+		cfg := e.p.getConfiguration()
+		cfg.AutoUpdateUsername = true
+		e.p.setConfiguration(cfg)
+		e.p.loginSnapshot = makeLoginSnapshot(cfg, e.p.oidcProvider, e.p.oidcVerifier, e.p.oauth2Config, e.p.encryptionKey)
+		e.user.Username = username
+		e.claims = claims
+		return e
+	}
+	loggedIn := func(t *testing.T, e *loginEnv) {
+		rec := e.webLogin()
+		require.Equal(t, http.StatusFound, rec.Code, rec.Body.String())
+		require.Equal(t, testSite+"/", rec.Header().Get("Location"))
+		require.Equal(t, 1, e.sessionCount())
+	}
+
+	t.Run("renames to a free username", func(t *testing.T) {
+		e := newEnv(t, "alice", map[string]any{"preferred_username": "Alice.Smith"})
+		e.api.On("GetUserByUsername", "alice.smith").Return(nil, model.NewAppError("GetUserByUsername", "app.user.get_by_username.app_error", nil, "", http.StatusNotFound))
+		e.api.On("UpdateUser", mock.Anything).Return(func(u *model.User) *model.User {
+			e.user = copyUser(u)
+			return u
+		}, nil).Once()
+
+		loggedIn(t, e)
+		require.Equal(t, "alice.smith", e.user.Username)
+		require.Equal(t, testUserID, e.user.Id)
+		require.Equal(t, testSubject, e.user.GetAuthData())
+	})
+
+	t.Run("logs in under the current name when the new one is taken", func(t *testing.T) {
+		e := newEnv(t, "alice_ab12cd", map[string]any{"preferred_username": "alice"})
+		e.api.On("GetUserByUsername", "alice").Return(&model.User{Id: "user-other-alice", Username: "alice"}, nil)
+
+		loggedIn(t, e)
+		e.api.AssertNotCalled(t, "UpdateUser", mock.Anything)
+	})
+
+	t.Run("logs in under the current name if the username is taken after lookup", func(t *testing.T) {
+		e := newEnv(t, "alice_ab12cd", map[string]any{"preferred_username": "alice"})
+		e.api.On("GetUserByUsername", "alice").Return(nil, model.NewAppError("GetUserByUsername", "app.user.get_by_username.app_error", nil, "", http.StatusNotFound))
+		e.api.On("UpdateUser", mock.Anything).Return(nil, model.NewAppError("UpdateUser", "app.user.save.username_exists.app_error", nil, "", http.StatusBadRequest)).Once()
+
+		loggedIn(t, e)
+		require.Equal(t, "alice_ab12cd", e.user.Username)
+	})
+
+	t.Run("rechecks identity after the username lookup", func(t *testing.T) {
+		e := newEnv(t, "alice", map[string]any{"preferred_username": "alice.smith"})
+		notFound := model.NewAppError("GetUserByUsername", "app.user.get_by_username.app_error", nil, "", http.StatusNotFound)
+		e.api.On("GetUserByUsername", "alice.smith").Run(func(mock.Arguments) {
+			_, err := e.p.freezeIdentityGate()
+			require.NoError(t, err)
+		}).Return(nil, notFound).Once()
+
+		require.Equal(t, http.StatusBadRequest, e.webLogin().Code)
+		require.Zero(t, e.sessionCount())
+		require.Equal(t, "alice", e.user.Username)
+		e.api.AssertNotCalled(t, "UpdateUser", mock.Anything)
+	})
+
+	t.Run("never applies the name derived from the email address", func(t *testing.T) {
+		e := newEnv(t, "alice_ab12cd", nil)
+
+		loggedIn(t, e)
+		e.api.AssertNotCalled(t, "GetUserByUsername", mock.Anything)
+		e.api.AssertNotCalled(t, "UpdateUser", mock.Anything)
+	})
+
+	t.Run("never applies a blank username claim", func(t *testing.T) {
+		e := newEnv(t, "alice_ab12cd", map[string]any{"preferred_username": " \t "})
+
+		loggedIn(t, e)
+		e.api.AssertNotCalled(t, "GetUserByUsername", mock.Anything)
+		e.api.AssertNotCalled(t, "UpdateUser", mock.Anything)
 	})
 }
 
@@ -1346,4 +1426,63 @@ func (a *credentialCallbackAPI) KVGet(key string) ([]byte, *model.AppError) {
 		}
 	}
 	return a.identityAPI.KVGet(key)
+}
+
+func TestClientSecretEnvironmentLifecycle(t *testing.T) {
+	t.Setenv(clientSecretEnvVar, "environment-secret")
+	var up atomic.Bool
+	var hits atomic.Int32
+	p, issuer := newDiscoveryTestPlugin(t, &up, &hits, nil)
+	up.Store(true)
+	cfg := Configuration{Enable: true, IssuerURL: issuer, ClientID: "mattermost", ClientSecret: "stored-secret"}
+	api := p.API.(quietAPI).API
+	api.On("KVGet", kvEncryptionKey).Return([]byte("test-key"), nil)
+	api.On("LoadPluginConfiguration", mock.Anything).Run(func(args mock.Arguments) {
+		*args.Get(0).(*Configuration) = cfg
+	}).Return(nil)
+	if err := p.OnConfigurationChange(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.OnActivate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.getOAuthConfig(); got == nil || got.ClientSecret != "environment-secret" {
+		t.Fatal("OAuth2 configuration did not use the environment secret")
+	}
+	if p.getConfiguration().ClientSecret != "environment-secret" || cfg.ClientSecret != "stored-secret" {
+		t.Fatal("expected an effective in-memory override and unchanged persisted settings")
+	}
+	rec := httptest.NewRecorder()
+	p.router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/config", nil))
+	if strings.Contains(rec.Body.String(), "environment-secret") {
+		t.Fatal("public configuration exposed the secret")
+	}
+	first := p.loginSnapshot
+	t.Setenv(clientSecretEnvVar, "rotated-environment-secret")
+	require.NoError(t, p.OnConfigurationChange())
+	require.NotNil(t, p.loginSnapshot)
+	require.Equal(t, first.IdentityFingerprint, p.loginSnapshot.IdentityFingerprint)
+	require.NotEqual(t, first.CallbackFingerprint, p.loginSnapshot.CallbackFingerprint)
+
+	// Removing the environment variable (without a stored secret) invalidates the
+	// configuration on the next reload and fails closed.
+	t.Setenv(clientSecretEnvVar, "")
+	cfg.ClientSecret = ""
+	if err := p.OnConfigurationChange(); err != nil {
+		t.Fatal(err)
+	}
+	if p.getOAuthConfig() != nil {
+		t.Fatal("missing environment secret retained the old OAuth2 configuration")
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("invalid settings triggered discovery: got %d calls, want 2", hits.Load())
+	}
+	// With the variable gone, the stored setting is used again.
+	cfg.ClientSecret = "stored-secret"
+	if err := p.OnConfigurationChange(); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.getOAuthConfig(); got == nil || got.ClientSecret != "stored-secret" {
+		t.Fatal("OAuth2 configuration did not fall back to the stored secret")
+	}
 }

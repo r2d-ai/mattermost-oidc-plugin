@@ -38,6 +38,7 @@ type loginEnv struct {
 	kv             map[string][]byte
 	ttl            map[string]int64
 	nonce          string
+	claims         map[string]any
 	sessions       int
 	api            *plugintest.API
 	refreshToken   string
@@ -68,10 +69,13 @@ func newLoginEnv(t *testing.T, siteURL string) *loginEnv {
 			_ = json.NewEncoder(w).Encode(map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks"})
 		case "/token":
 			e.mu.Lock()
-			nonce := e.nonce
+			claims := map[string]any{"iss": issuer, "sub": testSubject, "aud": "mattermost", "nonce": e.nonce, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "email": "alice@example.test"}
+			for k, v := range e.claims {
+				claims[k] = v
+			}
 			e.mu.Unlock()
-			claims, _ := json.Marshal(map[string]any{"iss": issuer, "sub": testSubject, "aud": "mattermost", "nonce": nonce, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(), "email": "alice@example.test"})
-			jws, _ := signer.Sign(claims)
+			payload, _ := json.Marshal(claims)
+			jws, _ := signer.Sign(payload)
 			raw, _ := jws.CompactSerialize()
 			e.mu.Lock()
 			e.idToken = raw
@@ -220,4 +224,17 @@ func (e *loginEnv) authorize(authURL string) string {
 	e.nonce = u.Query().Get("nonce")
 	e.mu.Unlock()
 	return "/oauth2/callback?code=idp-code&state=" + url.QueryEscape(u.Query().Get("state"))
+}
+
+// webLogin runs connect and the IdP callback in one browser and returns the callback response.
+func (e *loginEnv) webLogin() *httptest.ResponseRecorder {
+	connect := e.get("/oauth2/connect")
+	if connect.Code != http.StatusFound {
+		e.t.Fatalf("connect returned %d", connect.Code)
+	}
+	cb := httptest.NewRequest(http.MethodGet, e.authorize(connect.Header().Get("Location")), nil)
+	for _, c := range connect.Result().Cookies() {
+		cb.AddCookie(c)
+	}
+	return e.do(cb)
 }

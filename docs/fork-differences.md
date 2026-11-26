@@ -6,6 +6,34 @@ to `server-camp/mattermost-oidc-plugin`. For integration steps, use
 [identity migration](oidc-identity-migration.md) and
 [Plane broker operations](plane-broker-operations.md).
 
+## Upstream v0.8.0 integration
+
+The fork merges the 25 commits after `cbb7bda137571bd255497787601618f3ff3e1f6f`
+through the exact `v0.8.0` tag, `7818bd0cdb9a6d3b94f477749ed3cee8b6bf64db`.
+The fork manifest and webapp use `0.8.0-p1`. The server uses Mattermost SDK
+0.6.1, go-jose 4.1.9, and x/oauth2 0.38.0. Both modules still require Go 1.27.3.
+The original audit boundary below continues to describe the original 15 commits.
+
+- `MM_OIDC_CLIENT_SECRET` overrides the stored setting when each node loads its
+  configuration. Discovery, callbacks, broker exchange, refresh, and revocation
+  use the same effective secret. Changing it invalidates pending callback
+  fingerprints without changing the gate's issuer/client identity.
+- `AutoUpdateUsername` defaults off. When enabled, login may update an already
+  bound account using the configured nonblank username claim. The profile update
+  rechecks authority after looking up the proposed username. Missing claims,
+  collisions, and rejected renames keep the current name. Email linking remains
+  disabled, including the upstream repair path based on a raw-sub mapping.
+- The login bundle loads before authentication on supporting servers. Its DOM
+  integration can show the OIDC button when the enabled plugin is the only
+  sign-in method. Desktop redemption and native-mobile completion retain the
+  existing authority checks and credential fencing.
+- OAuth error rendering tolerates a canceled Mattermost response RPC. Router
+  recovery logs a fixed message without the request URL or panic contents.
+
+`TestClientSecretEnvironmentLifecycle`, `TestLoginUpdatesUsername`,
+`TestCallbackFingerprintEveryPolicy`, and
+`TestCanceledCallbackRequestDoesNotPanicPlugin` cover the fork adaptations.
+
 ## Upstream v0.7.0 integration
 
 The fork now includes upstream tag `v0.7.0` at

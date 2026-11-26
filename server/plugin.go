@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -121,6 +122,11 @@ func (p *Plugin) OnConfigurationChange() error {
 	var configuration Configuration
 	if err := p.API.LoadPluginConfiguration(&configuration); err != nil {
 		return fmt.Errorf("failed to load plugin configuration: %w", err)
+	}
+
+	// Resolve once for discovery, callbacks, refresh and exchange on this node.
+	if secret := os.Getenv(clientSecretEnvVar); secret != "" {
+		configuration.ClientSecret = secret
 	}
 
 	p.configurationLock.RLock()
@@ -317,6 +323,7 @@ func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Req
 // initRouter sets up HTTP routes for the plugin.
 func (p *Plugin) initRouter() {
 	p.router = mux.NewRouter()
+	p.router.Use(p.withRecovery)
 
 	// OAuth2 endpoints
 	p.router.HandleFunc("/oauth2/connect", p.handleOAuth2Connect).Methods(http.MethodGet)
@@ -325,6 +332,18 @@ func (p *Plugin) initRouter() {
 
 	// API endpoints
 	p.router.HandleFunc("/api/v1/config", p.handleGetPublicConfig).Methods(http.MethodGet)
+}
+
+// withRecovery contains a failed login request without logging its data.
+func (p *Plugin) withRecovery(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recover() != nil {
+				p.API.LogError("OIDC HTTP handler panicked")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // getEncryptionKey returns the HMAC signing key cached from the KV store.

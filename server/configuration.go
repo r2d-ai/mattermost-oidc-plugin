@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+// clientSecretEnvVar is the fixed name of an environment variable of the Mattermost
+// server process. When it is set to a non-empty value it overrides the ClientSecret
+// setting, so the credential can be kept out of the plugin configuration entirely
+// (e.g. injected from a Kubernetes Secret or a docker env file).
+const clientSecretEnvVar = "MM_OIDC_CLIENT_SECRET"
+
 // Configuration holds the plugin's settings from the System Console.
 type Configuration struct {
 	Enable bool `json:"Enable"`
@@ -27,6 +33,7 @@ type Configuration struct {
 	EmailVerifiedClaim     string `json:"EmailVerifiedClaim"`
 	RequireEmailVerified   bool   `json:"RequireEmailVerified"`
 	AutoCreateAccounts     bool   `json:"AutoCreateAccounts"`
+	AutoUpdateUsername     bool   `json:"AutoUpdateUsername"`
 	AutoLinkByEmail        bool   `json:"AutoLinkByEmail"` // Deprecated: decoded for compatibility; never grants ownership.
 	DefaultTeam            string `json:"DefaultTeam"`
 }

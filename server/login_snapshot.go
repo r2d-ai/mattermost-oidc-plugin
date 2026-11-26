@@ -36,6 +36,10 @@ func makeLoginSnapshot(c *Configuration, provider *oidc.Provider, verifier *oidc
 	scopes = slices.Compact(scopes)
 	fp := identityFingerprint(discovery.Issuer, c.ClientID)
 	material := []any{"mm-oidc-callback-v1", fp, c.ClientSecret, oauth.RedirectURL, scopes, c.UsernameClaim, c.EmailClaim, c.FirstNameClaim, c.LastNameClaim, c.PositionClaim, c.EmailVerifiedClaim, c.RequireEmailVerified, c.AutoCreateAccounts, c.DefaultTeam, discovery.Issuer, discovery.Auth, discovery.Token, discovery.Userinfo, discovery.JWKS}
+	// Keep the existing fingerprint when username sync is off.
+	if c.AutoUpdateUsername {
+		material = append(material, "auto-update-username")
+	}
 	b, _ := json.Marshal(material)
 	mac := hmac.New(sha256.New, []byte(key))
 	_, _ = mac.Write(b)

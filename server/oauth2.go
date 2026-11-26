@@ -86,6 +86,8 @@ type OIDCUserInfo struct {
 	LastName      string `json:"last_name"`
 	Position      string `json:"position,omitempty"`
 	EmailVerified *bool  `json:"email_verified,omitempty"`
+	// UsernameFromClaim distinguishes a provider claim from the email fallback.
+	UsernameFromClaim bool `json:"-"`
 }
 
 // handleOAuth2Connect initiates the OIDC login flow by redirecting the user to the identity provider's authorization endpoint.
@@ -362,6 +364,14 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if config.AutoUpdateUsername && userInfo.UsernameFromClaim && mmUser.Username != userInfo.Username {
+		mmUser, err = p.updateUsername(ctx, snapshot, binding, mmUser, userInfo.Username)
+		if err != nil {
+			p.renderError(w, "Identity unavailable. Contact your administrator.")
+			return
+		}
+	}
+
 	credentials := &StoredCredentials{
 		Binding: binding.Binding, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken,
 		AccessExpiresAt: token.Expiry, RefreshExpiresAt: refreshExpiry(token, tokenReceivedAt),
@@ -609,7 +619,10 @@ func (p *Plugin) extractUserInfo(ctx context.Context, idToken *oidc.IDToken, oau
 		EmailVerified: getBoolClaim(claims, config.EmailVerifiedClaim),
 	}
 
+	info.Username = strings.TrimSpace(info.Username)
+
 	// Fallback: use email prefix as username if no username claim found
+	info.UsernameFromClaim = info.Username != ""
 	if info.Username == "" && info.Email != "" {
 		parts := strings.SplitN(info.Email, "@", 2)
 		info.Username = parts[0]
@@ -669,6 +682,30 @@ func (p *Plugin) updateUserIfChanged(user *model.User, info *OIDCUserInfo) (*mod
 		return nil, fmt.Errorf("failed to update user: %s", appErr.Error())
 	}
 	return updatedUser, nil
+}
+
+// updateUsername changes a bound user's profile. A rejected rename can still complete login.
+func (p *Plugin) updateUsername(ctx context.Context, snapshot *LoginSnapshot, binding ResolvedIdentity, user *model.User, username string) (*model.User, error) {
+	if !model.IsValidUsername(username) {
+		p.API.LogWarn("OIDC username update rejected: invalid username")
+		return user, nil
+	}
+	if existing, appErr := p.API.GetUserByUsername(username); existing != nil || (appErr != nil && appErr.StatusCode != http.StatusNotFound) {
+		p.API.LogWarn("OIDC username update rejected: username unavailable")
+		return user, nil
+	}
+	if p.assertLoginSnapshot(ctx, snapshot) != nil || p.AssertCurrentBinding(ctx, binding) != nil {
+		return nil, ErrIdentityUnavailable
+	}
+
+	renamed := *user
+	renamed.Username = username
+	updated, appErr := p.API.UpdateUser(&renamed)
+	if appErr != nil || updated == nil {
+		p.API.LogWarn("OIDC username update failed")
+		return user, nil
+	}
+	return updated, nil
 }
 
 // handleGetPublicConfig returns the publicly visible configuration (button text/color, enable status).
@@ -809,8 +846,12 @@ func getCookiePath(siteURL string) string {
 
 // renderError renders a simple error page to the user.
 func (p *Plugin) renderError(w http.ResponseWriter, message string) {
+	header := w.Header()
+	if header == nil {
+		return // The Mattermost response RPC can be gone after cancellation.
+	}
 	siteURL := p.getSiteURL()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	header.Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusBadRequest)
 	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
