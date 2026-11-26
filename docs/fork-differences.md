@@ -1,5 +1,44 @@
 # Fork differences and commit ledger
 
+## Configured OAuth client in 0.7.0-p3
+
+The broker previously required the OAuth Client ID to be the literal
+`mattermost-oidc`, even when the identity gate had approved another configured
+client. That rejected working OIDC installations such as `ClientID=mattermost`
+with HTTP 403 before checking the user binding.
+
+The broker now uses the configured Client ID for exchange and requires the
+verified output token's `azp` to match that exact client. Plugin identity and
+internal routes remain `mattermost-oidc`. Issuer, subject, audience, scopes,
+signature, expiry, gate and configuration revision checks remain enforced.
+Changing configuration still freezes the identity gate as before; this fix
+requires no configuration change or renewed identity approval.
+
+
+## Same-issuer legacy upgrade recovery in 0.7.0-p2
+
+The initial gate previously required a manually constructed migration file,
+which blocked existing upstream users after installation. An explicit current
+administrator command, `approve-legacy <historical-issuer>`, now approves an
+initial same-issuer upgrade without SQL or a map file. The issuer must match
+configuration, but current configuration alone never creates approval.
+
+After approval, fresh fully verified callbacks adopt only exact legacy/native
+matches into the CAS-protected registry. UUIDs, native auth fields and existing
+sessions are preserved. Frozen gates and prior registry state cannot use this
+initial route. The generic reviewed migration and maintenance receipts remain
+unchanged. This is a deliberate addition to the historical no-legacy-fallback
+contract: unapproved legacy lookups still authorize nothing.
+
+Regression coverage: `TestLegacyUpgradeExplicitApprovalAndIdempotency`,
+`TestLegacyUpgradeApprovalRequiresCurrentAdminSession`,
+`TestLegacyUpgradeFreshLoginPreservesExistingUser`,
+`TestLegacyUpgradePartialCommitResumes`,
+`TestLegacyUpgradeConcurrentFreshLogins`,
+`TestLegacyUpgradeFreezeClearsApprovalAndCannotReapprove`, and signed TLS web
+and Desktop tests in `server/legacy_upgrade_login_test.go`.
+
+
 This reference records the changes in `r2d-ai/mattermost-oidc-plugin` relative
 to `server-camp/mattermost-oidc-plugin`. For integration steps, use
 [upstream updates](upstream-updates.md). For operating procedures, use
@@ -131,7 +170,7 @@ license remain unchanged.
 | Refresh and revocation | No delegated lifecycle | One CAS envelope/generation for capture, rotating refresh, candidate publication, and tombstones. Ambiguous refresh cannot retry old tokens. Local invalidation precedes best-effort provider revoke. `token_lifecycle.go` |
 | Delegated switches | Interactive `Enable` only | Capture needs `EnableTokenPersistence`; issuance needs it plus `EnablePlaneBroker`. Both default false. Interactive `Enable` is independent. Flags are live policy, not callback-fingerprint inputs. `configuration.go`, `plugin.go` |
 | Management API | No delegated management endpoints | POST disconnect/revoke require core session plus explicit CSRF; revoke requires current admin. Frozen/deactivated cleanup uses corroborated original binding without encryption keys. `plugin.go`, `token_lifecycle.go` |
-| Plane broker | No broker | Fixed POST exchange with independent HMAC, durable replay checks, current identity/generation/config/key assertions, root-origin SiteURL, fixed `mattermost-oidc` client, `plane-api` audience, and exact read or read/write scopes. `broker_auth.go`, `plane_broker.go` |
+| Plane broker | No broker | Fixed POST exchange with independent HMAC, durable replay checks, current identity/generation/config/key assertions, root-origin SiteURL, configured gate-approved OAuth client, `plane-api` audience, and exact read or read/write scopes. `broker_auth.go`, `plane_broker.go` |
 | Packaging | Nested plugin-ID archive directory | Flat root manifest and exact declared files, no links/extra files, executable binaries, release version verification and `SHA256SUMS`. `Makefile`, `scripts/test_bundle*.py`, `.github/workflows/ci.yml` |
 
 Source paths in this table are under `server/` unless qualified otherwise.

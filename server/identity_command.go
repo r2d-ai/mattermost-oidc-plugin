@@ -42,9 +42,9 @@ func readRegularApprovalFile(path string) ([]byte, error) {
 	return b, nil
 }
 func (p *Plugin) registerIdentityCommand() error {
-	return p.API.RegisterCommand(&model.Command{Trigger: "oidc-identity", DisplayName: "OIDC identity maintenance", AutoComplete: true, AutoCompleteDesc: "System administrators: status, freeze, validate <sha256>, apply <sha256>, activate <sha256>", AutoCompleteHint: "status | freeze | validate <sha256> | apply <sha256> | activate <sha256>"})
+	return p.API.RegisterCommand(&model.Command{Trigger: "oidc-identity", DisplayName: "OIDC identity maintenance", AutoComplete: true, AutoCompleteDesc: "System administrators: status, approve-legacy <historical-issuer>, freeze, validate <sha256>, apply <sha256>, activate <sha256>", AutoCompleteHint: "status | approve-legacy <historical-issuer> | freeze | validate <sha256> | apply <sha256> | activate <sha256>"})
 }
-func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
+func (p *Plugin) ExecuteCommand(pc *plugin.Context, args *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
 	reply := func(text string) (*model.CommandResponse, *model.AppError) {
 		return &model.CommandResponse{ResponseType: model.CommandResponseTypeEphemeral, Text: text}, nil
 	}
@@ -60,6 +60,27 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 		return reply("invalid_command")
 	}
 	sub := parts[1]
+	if sub == "approve-legacy" {
+		if len(parts) != 3 {
+			return reply("invalid_command")
+		}
+		if pc == nil || !model.IsValidId(pc.SessionId) {
+			return reply("authority_denied")
+		}
+		session, ae := p.API.GetSession(pc.SessionId)
+		if ae != nil || session == nil || session.Id != pc.SessionId || session.UserId != actor.Id || session.IsExpired() || session.IsIntegration() || session.Local {
+			return reply("authority_denied")
+		}
+		if e := p.approveLegacyUpgrade(actor.Id, parts[2]); e != nil {
+			return reply("outcome=" + identityCommandOutcome(e) + " conflicts=1")
+		}
+		g, _, e := p.readIdentityGate()
+		if e != nil {
+			return reply("outcome=" + identityCommandOutcome(e) + " conflicts=1")
+		}
+		p.API.LogInfo("OIDC legacy upgrade approved", "actor_id", actor.Id, "epoch", g.Epoch)
+		return reply(fmt.Sprintf("outcome=ok gate=%s epoch=%d legacy_upgrade=approved", g.Status, g.Epoch))
+	}
 	if (sub == "status" || sub == "freeze") && len(parts) != 2 {
 		return reply("invalid_command")
 	}

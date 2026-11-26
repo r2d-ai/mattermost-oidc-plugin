@@ -20,13 +20,20 @@ cannot distinguish upstream from this fork. Record source SHA and archive SHA256
 
 - Identity ownership is the exact verified `(issuer, subject)` bound to one
   Mattermost UUID through matching committed forward/reverse CAS records.
-  `AutoLinkByEmail` is ignored. Email and `oidc_user_<subject>` are never login
-  authority. Do not restore upstream `getOrCreateUser` or email-based auth conversion.
+  `AutoLinkByEmail` is ignored. Email and `oidc_user_<subject>` alone are never
+  login authority. Initial legacy upgrade adoption additionally requires the
+  explicit historical-issuer approval and a fresh verified OIDC callback. Do not restore upstream `getOrCreateUser` or
+  email-based auth conversion.
 - New native `AuthData` is `v2:` plus the pair digest, 67 bytes. Reviewed legacy
   imports retain their UUID and raw-sub auth fields. Never normalize verified
   issuer/subject or reassign a committed UUID.
 - Missing/uninitialized/frozen identity gate denies OIDC work. Even an empty
-  install needs explicit administrator approval. Issuer/client-ID changes freeze
+  install needs explicit administrator approval. For an initial same-issuer
+  upgrade, a current administrator may use `approve-legacy <historical-issuer>`
+  to approve the historical namespace without SQL or an external map. Only
+  fully verified callbacks can then adopt exact matching legacy/native users;
+  never infer this approval from configuration. Frozen gates remain blocked.
+  Issuer/client-ID changes freeze
   the durable gate; reverting config or restarting cannot reactivate it.
   Native password administrator access stays independent.
 - Callbacks use one `LoginSnapshot`, signed state fingerprints and gate epoch.
@@ -59,7 +66,7 @@ cannot distinguish upstream from this fork. Record source SHA and archive SHA256
   or broker fallback, or expose secret-bearing structs/provider bodies in logs.
 - Broker calls require canonical HMAC authentication and durable replay CAS on
   both public HTTP and `PluginHTTP`. User headers, UUIDs, and plugin transport
-  alone authorize nothing. Keep the fixed client/audience/scopes, verified output,
+  alone authorize nothing. Keep the approved configured client, fixed audience/scopes, verified output,
   generation/configuration/key rechecks, no-store responses, and 409 versus 503
   classification. Nonce bucket collisions must coexist; never evict live nonces.
 - Disconnect/revoke require a current core human session and explicit CSRF;
@@ -144,3 +151,28 @@ server targets and tests/builds the webapp, validates the flat bundle, and build
 image. The server linter is non-blocking. Release checks require the tag to be
 reachable from `main`, matching manifest version, executable artifacts, and
 checksums. The audit helper is currently a manual check, not a CI job.
+
+## Integration documentation and support
+
+- Use [complete setup](https://github.com/r2d-ai/mattermost-plugin-plane/blob/main/docs/setup.md)
+  and the [local troubleshooting runbook](docs/plane-troubleshooting.md).
+- Installation guidance must include all six Mattermost key variables, the two
+  delegated switches and the independent Plane API bearer policy. Action HMAC,
+  broker HMAC and credential-encryption keys are not interchangeable.
+- Keep OAuth Client ID, plugin ID, browser client and API audience distinct.
+  Never ask an operator to rename a working client to satisfy a routing constant.
+- Preserve the fixed Plane request grammar. Response scopes outside `plane.*`
+  do not grant Plane permissions. Do not recreate a realm-specific supplemental
+  scope allowlist or require disabling normal login scopes for compatibility.
+- Distinguish broker readiness from Plane API authorization. A downstream API
+  401 can produce reconnect guidance without requiring new credentials.
+- Log only fixed diagnostic reasons, status and allowlisted provider codes.
+  Do not log tokens, secrets, raw provider errors or real identities in examples.
+- Validate the actual command actor's issuer/subject. Do not infer it from a
+  different browser request or equate native UUIDs across applications.
+- A diagnostic `_access_jwks` call can write shared Redis state. Document that
+  side effect. Cache warming explaining a successful request is only a hypothesis
+  until cold/expired-cache behavior is reproduced. Do not erase that uncertainty
+  from incident notes or claim permanent recovery from a warm-cache test.
+- Preserve TLS verification. A public-URL certificate error in a diagnostic
+  shell is not proof of a bearer-verification failure in another process.

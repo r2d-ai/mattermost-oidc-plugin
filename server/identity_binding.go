@@ -199,13 +199,21 @@ func (p *Plugin) resolveVerifiedLogin(ctx context.Context, s *LoginSnapshot, id 
 	for attempt := 0; attempt < 32; attempt++ {
 		r, raw, e := p.readIdentityRecord(pairKey(b))
 		if e == ErrIdentityUnproven {
-			// Legacy entries are collision evidence only, never ownership authority.
+			// Legacy entries need explicit historical-issuer approval before a
+			// fresh verified login can migrate them into the identity registry.
 			legacy, ae := p.API.KVGet(KVOIDCUserPrefix + id.Subject)
 			if ae != nil {
 				return empty, nil, ErrIdentityUnavailable
 			}
 			if len(legacy) > 0 {
-				return empty, nil, ErrIdentityUnproven
+				candidate, err := p.approvedLegacyRecord(ctx, s, b)
+				if err != nil {
+					return empty, nil, err
+				}
+				if _, err = p.casIdentity(pairKey(b), nil, candidate); err != nil {
+					return empty, nil, err
+				}
+				continue
 			}
 			if !s.configuration.AutoCreateAccounts {
 				return empty, nil, ErrIdentityUnproven
@@ -261,6 +269,12 @@ func (p *Plugin) resolveVerifiedLogin(ctx context.Context, s *LoginSnapshot, id 
 				return empty, nil, e
 			}
 			return out, u, nil
+		}
+		if r.Mode == LegacyRaw {
+			if e = p.finishLegacyUpgrade(ctx, s, r); e != nil {
+				return empty, nil, e
+			}
+			continue
 		}
 		if r.Mode != QualifiedV2 || r.Username == "" {
 			return empty, nil, ErrIdentityUnproven

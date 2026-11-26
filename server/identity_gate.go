@@ -20,14 +20,15 @@ var (
 const identityGateKey = "identity_v1_gate"
 
 type identityGate struct {
-	Version             int                 `json:"version"`
-	Status              string              `json:"status"`
-	Epoch               uint64              `json:"epoch"`
-	Issuer              string              `json:"issuer"`
-	ClientID            string              `json:"client_id"`
-	IdentityFingerprint string              `json:"identity_fingerprint"`
-	ApprovedMapSHA256   string              `json:"approved_map_sha256"`
-	MaintenanceReceipt  *maintenanceReceipt `json:"maintenance_receipt"`
+	Version             int                    `json:"version"`
+	Status              string                 `json:"status"`
+	Epoch               uint64                 `json:"epoch"`
+	Issuer              string                 `json:"issuer"`
+	ClientID            string                 `json:"client_id"`
+	IdentityFingerprint string                 `json:"identity_fingerprint"`
+	ApprovedMapSHA256   string                 `json:"approved_map_sha256"`
+	MaintenanceReceipt  *maintenanceReceipt    `json:"maintenance_receipt"`
+	LegacyUpgrade       *legacyUpgradeApproval `json:"legacy_upgrade,omitempty"`
 }
 
 // Maintenance fields are operator attestations, not remotely verified facts.
@@ -90,6 +91,7 @@ func (p *Plugin) freezeIdentityGate() (identityGate, error) {
 		g.Epoch++
 		g.ApprovedMapSHA256 = ""
 		g.MaintenanceReceipt = nil
+		g.LegacyUpgrade = nil
 		ok, e := p.casIdentity(identityGateKey, b, g)
 		if e != nil {
 			return g, e

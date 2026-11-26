@@ -1,5 +1,8 @@
 # Encrypted delegated credentials
 
+For installation order and common failures, use the [setup guide](https://github.com/r2d-ai/mattermost-plugin-plane/blob/main/docs/setup.md)
+and [troubleshooting runbook](plane-troubleshooting.md).
+
 For fork provenance and merge/backport requirements, see
 [fork differences](fork-differences.md) and [upstream updates](upstream-updates.md).
 Historical B0/B1/B2/B3 labels refer to identity, persistence, lifecycle, and broker
@@ -390,7 +393,18 @@ core owns ingress/body delivery and its limits before plugin invocation.
 
 ### Fixed exchange and verified output
 
-The broker exchanges as the configured confidential client `mattermost-oidc`
+The Mattermost **Broker plugin ID** is always `mattermost-oidc`; it selects the
+installed plugin and the internal route. The **OIDC Client ID** is the OAuth
+client registered in the provider, for example `mattermost`. These identifiers
+have separate purposes and do not need to be equal. Version `0.7.0-p3` uses the
+already configured and gate-approved OAuth Client ID. Keep that client unchanged
+when upgrading; the broker still requests only audience `plane-api` and the
+approved Plane scopes. The Plane API must include the same OAuth client in its
+`OIDC_API_ALLOWED_CLIENTS` environment allowlist. For an existing client named
+`mattermost`, add `mattermost` to that list without dropping other required
+clients. This API token allowlist is separate from Plane's web-login Client ID.
+
+The broker exchanges as the configured confidential OIDC client (`ClientID`)
 using `client_secret_post`, V2 token-exchange grant, access-token subject and
 requested types, `plane-api` audience and the exact requested scope. Discovery
 must return the exact approved HTTPS issuer; token and JWKS endpoints must use
@@ -400,7 +414,9 @@ an ordinary subject token need not itself contain Plane scopes.
 Output verification uses only issuer-discovered JWKS and RS256 signatures;
 token-directed key URLs are never fetched. Signed claims must contain exact
 issuer and current stored subject, audience consisting only of `plane-api`,
-`azp=mattermost-oidc`, payload `typ=Bearer`, and exactly the requested scope set.
+`azp` equal to that configured Client ID and payload `typ=Bearer`. Every requested
+Plane grant must be present. Unrequested write or unknown `plane.*` grants fail;
+unrelated valid OAuth scopes may coexist without granting Plane permissions.
 Integer `iat`/`exp` are mandatory; lifetime must be 120–300 seconds, iat/optional
 nbf allow at most 30 seconds of future skew, and more than 30 seconds of actual
 validity must remain at release. Expires metadata must agree within 30 seconds
@@ -446,3 +462,14 @@ records those checks for `cfbd710` only. Later hardening builds need their own
 applicable runtime checks and independent acceptance before rollout. That
 evidence does not authorize Plane/P2 or production enablement; no unsigned
 exchange fallback is permitted.
+
+### Plane grant validation in 0.7.0-p6
+
+The broker validates the exact requested Plane grants within the returned scope
+set. Every requested grant is required. Unrequested `plane.write`, unknown
+`plane.*` capabilities and duplicate scopes are rejected. Scopes outside the
+`plane.*` namespace do not grant any Plane permission and may coexist in the
+access token; the broker does not maintain an allowlist of unrelated scopes.
+Request scope grammar, exact API audience, signatures, issuer/subject/client,
+expiry and release authority checks remain unchanged. Refresh tokens and ID
+tokens are never released by the broker.

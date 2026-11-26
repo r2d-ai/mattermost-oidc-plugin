@@ -35,6 +35,11 @@ type brokerFixtureState struct {
 
 func brokerFixture(t *testing.T) *brokerFixtureState {
 	t.Helper()
+	return brokerFixtureForClient(t, "mattermost-oidc")
+}
+
+func brokerFixtureForClient(t *testing.T, clientID string) *brokerFixtureState {
+	t.Helper()
 	brokerKeys(t)
 	key, e := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, e)
@@ -55,7 +60,7 @@ func brokerFixture(t *testing.T) *brokerFixtureState {
 				return
 			}
 			require.Equal(t, "urn:ietf:params:oauth:grant-type:token-exchange", r.Form.Get("grant_type"))
-			require.Equal(t, "mattermost-oidc", r.Form.Get("client_id"))
+			require.Equal(t, clientID, r.Form.Get("client_id"))
 			require.Equal(t, "plane-api", r.Form.Get("audience"))
 			require.Equal(t, "urn:ietf:params:oauth:token-type:access_token", r.Form.Get("subject_token_type"))
 			require.Empty(t, r.Form.Get("requested_subject"))
@@ -64,7 +69,7 @@ func brokerFixture(t *testing.T) *brokerFixtureState {
 				return
 			}
 			now := time.Now().Unix()
-			claims := map[string]any{"iss": issuer, "sub": r.Form.Get("subject_token"), "aud": "plane-api", "azp": "mattermost-oidc", "typ": "Bearer", "scope": r.Form.Get("scope"), "iat": now, "exp": now + 180}
+			claims := map[string]any{"iss": issuer, "sub": r.Form.Get("subject_token"), "aud": "plane-api", "azp": clientID, "typ": "Bearer", "scope": r.Form.Get("scope"), "iat": now, "exp": now + 180}
 			if f.claims != nil {
 				f.claims(claims)
 			}
@@ -95,7 +100,7 @@ func brokerFixture(t *testing.T) *brokerFixtureState {
 	p.discoveryClient = srv.Client()
 	cfg := p.getConfiguration()
 	cfg.IssuerURL = issuer
-	cfg.ClientID = "mattermost-oidc"
+	cfg.ClientID = clientID
 	cfg.EnablePlaneBroker = true
 	cfg.EnableTokenPersistence = true
 	p.setConfiguration(cfg)

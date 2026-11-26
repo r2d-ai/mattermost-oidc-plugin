@@ -1,5 +1,43 @@
 # OIDC identity migration and recovery
 
+## Initial upgrade with existing OIDC users
+
+Version `0.7.0-p2` adds an initial upgrade route that does not require a manual
+approval map. Install this build on all nodes before running the command. Keep
+a current System Admin session open and confirm the exact issuer used by the
+previous deployment. For example:
+
+```text
+/oidc-identity status
+/oidc-identity approve-legacy https://login.example.com/realms/work
+```
+
+`approve-legacy` requires a current ordinary administrator session and an exact
+match to the configured issuer. It only accepts an uninitialized gate with no
+existing identity registry. It records the administrator's explicit approval
+of the historical issuer/client namespace. It does not derive historical
+provenance from the current configuration or an email match.
+
+On the next fully verified login, a legacy subject mapping must identify an
+active human user whose native `AuthService` is `oidc` and whose `AuthData`
+is exactly that verified subject. The callback creates matching forward/reverse
+registry records using CAS and preserves the existing UUID and auth fields.
+Partial writes can resume; conflicts are rejected. The existing session,
+state-cookie, nonce, PKCE and Desktop verifier checks still apply.
+
+This same-issuer adoption keeps existing sessions and requires each account to
+prove a new OIDC login before migration or credential capture. It does not
+claim that old sessions were revoked and does not manufacture a maintenance
+receipt. Broker access becomes available for a user only after their verified
+login and successful encrypted credential capture.
+
+Repeating the same approval is idempotent. A frozen or previously approved
+non-upgrade gate cannot use this route. Freezing, changing issuer or changing
+client ID removes the upgrade approval; restoring old configuration cannot
+reactivate it. Deliberate provider changes and existing registry conflicts
+continue to use the reviewed maintenance procedure below.
+
+
 This foundation binds a verified `(issuer, subject)` to one Mattermost UUID. Email is profile data. Native password login and emergency system administrators remain independent of the OIDC gate.
 
 This runbook covers the identity layer, called B0 in historical evidence.
